@@ -1,0 +1,11 @@
+.git
+data/
+*.db
+node_modules/
+frontend/node_modules/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+index.html
+main.py

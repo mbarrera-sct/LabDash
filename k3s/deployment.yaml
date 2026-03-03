@@ -1,0 +1,178 @@
+---
+# ─── Namespace ───────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: labdash
+
+---
+# ─── Secret (credentials) ────────────────────────────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: labdash-secrets
+  namespace: labdash
+type: Opaque
+stringData:
+  PVE_URL:      "https://192.168.1.7:8006"
+  PVE_USER:     "root@pam"
+  PVE_PASS:     ""
+  OPN_URL:      "https://192.168.1.1"
+  OPN_KEY:      ""
+  OPN_SECRET:   ""
+  K8S_URL:      ""
+  K8S_TOKEN:    ""
+  UNRAID_URL:   ""
+  UNRAID_KEY:   ""
+  PLEX_URL:     ""
+  PLEX_TOKEN:   ""
+  IMMICH_URL:   ""
+  IMMICH_KEY:   ""
+  HA_URL:       ""
+  HA_TOKEN:     ""
+  HA_ENTITIES:  ""
+
+---
+# ─── PVC (SQLite persistence) ────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: labdash-data
+  namespace: labdash
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+# ─── ServiceAccount + RBAC (K8s API read) ────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: labdash
+  namespace: labdash
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: labdash-reader
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods", "namespaces"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets", "statefulsets"]
+    verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: labdash-reader
+subjects:
+  - kind: ServiceAccount
+    name: labdash
+    namespace: labdash
+roleRef:
+  kind: ClusterRole
+  name: labdash-reader
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ─── Deployment ──────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: labdash
+  namespace: labdash
+  labels:
+    app: labdash
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: labdash
+  template:
+    metadata:
+      labels:
+        app: labdash
+    spec:
+      serviceAccountName: labdash
+      containers:
+        - name: labdash
+          image: ghcr.io/mbarrera-sct/labdash:latest  # cambia a tu imagen
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: labdash-secrets
+          env:
+            - name: DB_PATH
+              value: /data/labdash.db
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 512Mi
+              cpu: 500m
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: labdash-data
+
+---
+# ─── Service ─────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: labdash
+  namespace: labdash
+spec:
+  selector:
+    app: labdash
+  ports:
+    - port: 80
+      targetPort: 8080
+  type: ClusterIP
+
+---
+# ─── Ingress ─────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: labdash
+  namespace: labdash
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: dash.home.local   # ← cambia a tu hostname
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: labdash
+                port:
+                  number: 80

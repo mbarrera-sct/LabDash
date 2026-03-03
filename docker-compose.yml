@@ -1,0 +1,41 @@
+services:
+  labdash:
+    build: .
+    container_name: labdash
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      DB_PATH: /data/labdash.db
+      # Proxmox (optional — can also be set via Settings UI)
+      PVE_URL: "${PVE_URL:-https://192.168.1.7:8006}"
+      PVE_USER: "${PVE_USER:-root@pam}"
+      PVE_PASS: "${PVE_PASS:-}"
+      # OPNsense
+      OPN_URL: "${OPN_URL:-https://192.168.1.1}"
+      OPN_KEY: "${OPN_KEY:-}"
+      OPN_SECRET: "${OPN_SECRET:-}"
+      # Kubernetes
+      K8S_URL: "${K8S_URL:-}"
+      K8S_TOKEN: "${K8S_TOKEN:-}"
+      # Unraid
+      UNRAID_URL: "${UNRAID_URL:-}"
+      UNRAID_KEY: "${UNRAID_KEY:-}"
+      # Plex
+      PLEX_URL: "${PLEX_URL:-}"
+      PLEX_TOKEN: "${PLEX_TOKEN:-}"
+      # Immich
+      IMMICH_URL: "${IMMICH_URL:-}"
+      IMMICH_KEY: "${IMMICH_KEY:-}"
+      # Home Assistant
+      HA_URL: "${HA_URL:-}"
+      HA_TOKEN: "${HA_TOKEN:-}"
+      HA_ENTITIES: "${HA_ENTITIES:-}"
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')\"" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

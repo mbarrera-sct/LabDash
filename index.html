@@ -1,0 +1,1559 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MXHOME — Infrastructure Dashboard</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            --bg: #0a0e1a;
+            --bg2: #0f1628;
+            --card: rgba(255, 255, 255, 0.04);
+            --border: rgba(99, 179, 237, 0.15);
+            --accent: #63b3ed;
+            --accent2: #68d391;
+            --accent3: #fc8181;
+            --accent4: #fbd38d;
+            --text: #e2e8f0;
+            --muted: #718096;
+            --glow: rgba(99, 179, 237, 0.3)
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: Inter, sans-serif;
+            min-height: 100vh;
+            overflow-x: hidden
+        }
+
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            background-image: linear-gradient(rgba(99, 179, 237, 0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(99, 179, 237, 0.03) 1px, transparent 1px);
+            background-size: 40px 40px;
+            pointer-events: none;
+            z-index: 0
+        }
+
+        .wrap {
+            max-width: 1500px;
+            margin: 0 auto;
+            padding: 0 24px;
+            position: relative;
+            z-index: 1
+        }
+
+        header {
+            padding: 32px 0 24px;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 40px
+        }
+
+        .hdr {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 16px
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 16px
+        }
+
+        .logo-icon {
+            width: 52px;
+            height: 52px;
+            background: linear-gradient(135deg, #2b6cb0, #63b3ed);
+            border-radius: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            box-shadow: 0 0 20px var(--glow)
+        }
+
+        .logo h1 {
+            font-size: 28px;
+            font-weight: 700;
+            letter-spacing: -.5px
+        }
+
+        .logo h1 span {
+            color: var(--accent)
+        }
+
+        .logo p {
+            color: var(--muted);
+            font-size: 13px;
+            margin-top: 2px
+        }
+
+        .badges {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap
+        }
+
+        .badge {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 5px 12px;
+            font-size: 12px;
+            font-weight: 500
+        }
+
+        .dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            animation: pulse 2s infinite
+        }
+
+        .dg {
+            background: var(--accent2);
+            box-shadow: 0 0 6px var(--accent2)
+        }
+
+        .db {
+            background: var(--accent);
+            box-shadow: 0 0 6px var(--accent)
+        }
+
+        .dy {
+            background: var(--accent4);
+            box-shadow: 0 0 6px var(--accent4)
+        }
+
+        .dr {
+            background: var(--accent3);
+            box-shadow: 0 0 6px var(--accent3)
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1
+            }
+
+            50% {
+                opacity: .4
+            }
+        }
+
+        /* Stats bar */
+        .stats-bar {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+            gap: 12px;
+            margin-bottom: 40px
+        }
+
+        .stat-card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 16px;
+            text-align: center
+        }
+
+        .stat-card .sv {
+            font-size: 28px;
+            font-weight: 700;
+            font-family: "JetBrains Mono", monospace
+        }
+
+        .stat-card .sk {
+            font-size: 11px;
+            color: var(--muted);
+            margin-top: 4px;
+            text-transform: uppercase;
+            letter-spacing: 1px
+        }
+
+        .sec {
+            margin-bottom: 40px
+        }
+
+        .sec-t {
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: var(--muted);
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 10px
+        }
+
+        .sec-t::after {
+            content: "";
+            flex: 1;
+            height: 1px;
+            background: linear-gradient(90deg, var(--border), transparent)
+        }
+
+        .g3 {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 16px
+        }
+
+        .g2 {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+            gap: 16px
+        }
+
+        .g5 {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+            gap: 14px
+        }
+
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 20px;
+            transition: all .2s;
+            backdrop-filter: blur(8px)
+        }
+
+        .card:hover {
+            border-color: rgba(99, 179, 237, .4);
+            transform: translateY(-2px);
+            box-shadow: 0 8px 30px rgba(0, 0, 0, .3)
+        }
+
+        .ch {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 14px
+        }
+
+        .ci {
+            width: 38px;
+            height: 38px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+            flex-shrink: 0
+        }
+
+        .ib {
+            background: rgba(99, 179, 237, .15);
+            color: var(--accent)
+        }
+
+        .ig {
+            background: rgba(104, 211, 145, .15);
+            color: var(--accent2)
+        }
+
+        .ir {
+            background: rgba(252, 129, 129, .15);
+            color: var(--accent3)
+        }
+
+        .iy {
+            background: rgba(251, 211, 141, .15);
+            color: var(--accent4)
+        }
+
+        .ip {
+            background: rgba(183, 148, 246, .15);
+            color: #b794f4
+        }
+
+        .ic {
+            background: rgba(129, 230, 217, .15);
+            color: #81e6d9
+        }
+
+        .io {
+            background: rgba(251, 182, 76, .15);
+            color: #f6ad55
+        }
+
+        .ct {
+            font-size: 15px;
+            font-weight: 600
+        }
+
+        .cs {
+            font-size: 11px;
+            color: var(--muted);
+            margin-top: 1px
+        }
+
+        .sr {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, .04);
+            font-size: 13px
+        }
+
+        .sr:last-child {
+            border-bottom: none
+        }
+
+        .sk {
+            color: var(--muted)
+        }
+
+        .sv {
+            font-family: "JetBrains Mono", monospace;
+            font-size: 12px
+        }
+
+        .vb {
+            color: var(--accent)
+        }
+
+        .vg {
+            color: var(--accent2)
+        }
+
+        .vy {
+            color: var(--accent4)
+        }
+
+        .vr {
+            color: var(--accent3)
+        }
+
+        .vp {
+            color: #b794f4
+        }
+
+        .vc {
+            color: #81e6d9
+        }
+
+        .pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 10px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 10px
+        }
+
+        .pg {
+            background: rgba(104, 211, 145, .15);
+            color: var(--accent2)
+        }
+
+        .py {
+            background: rgba(251, 211, 141, .15);
+            color: var(--accent4)
+        }
+
+        .pr {
+            background: rgba(252, 129, 129, .15);
+            color: var(--accent3)
+        }
+
+        .pb {
+            background: rgba(99, 179, 237, .15);
+            color: var(--accent)
+        }
+
+        .pp {
+            background: rgba(183, 148, 246, .15);
+            color: #b794f4
+        }
+
+        /* Network */
+        .net {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 32px;
+            margin-bottom: 40px
+        }
+
+        .net-t {
+            text-align: center;
+            font-size: 13px;
+            color: var(--muted);
+            margin-bottom: 28px;
+            letter-spacing: 1px;
+            text-transform: uppercase
+        }
+
+        .nn {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 6px;
+            background: rgba(255, 255, 255, .03);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 12px 16px;
+            min-width: 95px;
+            text-align: center;
+            transition: all .2s
+        }
+
+        .nn:hover {
+            border-color: var(--accent);
+            box-shadow: 0 0 16px var(--glow)
+        }
+
+        .nn i {
+            font-size: 22px
+        }
+
+        .nm {
+            font-size: 11px;
+            font-weight: 600
+        }
+
+        .ni {
+            font-size: 10px;
+            color: var(--muted);
+            font-family: "JetBrains Mono", monospace
+        }
+
+        .nl {
+            width: 2px;
+            height: 24px;
+            background: linear-gradient(180deg, var(--accent), rgba(99, 179, 237, .2));
+            position: relative
+        }
+
+        .nl::after {
+            content: "";
+            position: absolute;
+            bottom: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-top: 6px solid var(--accent)
+        }
+
+        .vl {
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--accent4);
+            background: rgba(251, 211, 141, .1);
+            border: 1px solid rgba(251, 211, 141, .2);
+            border-radius: 6px;
+            padding: 2px 8px;
+            font-family: "JetBrains Mono", monospace;
+            white-space: nowrap
+        }
+
+        .vl-b {
+            color: var(--accent);
+            background: rgba(99, 179, 237, .1);
+            border-color: rgba(99, 179, 237, .2)
+        }
+
+        .vl-g {
+            color: var(--accent2);
+            background: rgba(104, 211, 145, .1);
+            border-color: rgba(104, 211, 145, .2)
+        }
+
+        .vl-p {
+            color: #b794f4;
+            background: rgba(183, 148, 246, .1);
+            border-color: rgba(183, 148, 246, .2)
+        }
+
+        .vl-r {
+            color: var(--accent3);
+            background: rgba(252, 129, 129, .1);
+            border-color: rgba(252, 129, 129, .2)
+        }
+
+        .col {
+            display: flex;
+            flex-direction: column;
+            align-items: center
+        }
+
+        .row {
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            gap: 16px;
+            flex-wrap: wrap
+        }
+
+        /* VM tables */
+        .vt {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px
+        }
+
+        .vt th {
+            text-align: left;
+            padding: 7px 10px;
+            color: var(--muted);
+            font-size: 10px;
+            font-weight: 600;
+            border-bottom: 1px solid var(--border);
+            text-transform: uppercase;
+            letter-spacing: .5px
+        }
+
+        .vt td {
+            padding: 7px 10px;
+            border-bottom: 1px solid rgba(255, 255, 255, .03);
+            font-family: "JetBrains Mono", monospace;
+            font-size: 11px
+        }
+
+        .vt tr:last-child td {
+            border-bottom: none
+        }
+
+        .vt tr:hover td {
+            background: rgba(255, 255, 255, .02)
+        }
+
+        .lxc-badge {
+            display: inline-block;
+            font-size: 9px;
+            padding: 1px 5px;
+            border-radius: 4px;
+            background: rgba(129, 230, 217, .15);
+            color: #81e6d9;
+            border: 1px solid rgba(129, 230, 217, .2);
+            margin-left: 4px
+        }
+
+        .vm-badge {
+            display: inline-block;
+            font-size: 9px;
+            padding: 1px 5px;
+            border-radius: 4px;
+            background: rgba(99, 179, 237, .1);
+            color: var(--accent);
+            border: 1px solid rgba(99, 179, 237, .2);
+            margin-left: 4px
+        }
+
+        /* node header */
+        .node-hdr {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 16px;
+            background: rgba(255, 255, 255, .02);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            margin-bottom: 12px
+        }
+
+        .node-hdr i {
+            font-size: 20px;
+            color: var(--accent)
+        }
+
+        .node-hdr .nh {
+            font-size: 14px;
+            font-weight: 600
+        }
+
+        .node-hdr .ns {
+            font-size: 11px;
+            color: var(--muted)
+        }
+
+        /* Templates */
+        .tmpl-c {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 14px 16px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            transition: all .2s
+        }
+
+        .tmpl-c:hover {
+            border-color: rgba(99, 179, 237, .4);
+            transform: translateY(-1px)
+        }
+
+        .tid {
+            margin-left: auto;
+            font-family: "JetBrains Mono", monospace;
+            font-size: 11px;
+            color: var(--muted);
+            background: rgba(255, 255, 255, .05);
+            padding: 3px 8px;
+            border-radius: 6px
+        }
+
+        .prog {
+            background: rgba(255, 255, 255, .06);
+            border-radius: 4px;
+            height: 5px;
+            overflow: hidden;
+            margin-top: 8px
+        }
+
+        .pf {
+            height: 100%;
+            border-radius: 4px
+        }
+
+        .pfb {
+            background: linear-gradient(90deg, #2b6cb0, #63b3ed)
+        }
+
+        .pfg {
+            background: linear-gradient(90deg, #276749, #68d391)
+        }
+
+        .pfy {
+            background: linear-gradient(90deg, #975a16, #fbd38d)
+        }
+
+        footer {
+            margin-top: 60px;
+            padding: 24px 0;
+            border-top: 1px solid var(--border);
+            text-align: center;
+            color: var(--muted);
+            font-size: 12px
+        }
+
+        footer span {
+            color: var(--accent)
+        }
+
+        @media(max-width:700px) {
+            .hdr {
+                flex-direction: column
+            }
+
+            .row {
+                flex-direction: column;
+                align-items: center
+            }
+
+            .stats-bar {
+                grid-template-columns: repeat(2, 1fr)
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="wrap">
+
+        <header>
+            <div class="hdr">
+                <div class="logo">
+                    <div class="logo-icon"><i class="fa-solid fa-server"></i></div>
+                    <div>
+                        <h1>MX<span>HOME</span></h1>
+                        <p>Home Lab Infrastructure Dashboard — Cluster Proxmox</p>
+                    </div>
+                </div>
+                <div class="badges">
+                    <div class="badge"><span class="dot dg"></span> PVE 9.1.6 · 3 nodos</div>
+                    <div class="badge"><span class="dot dg"></span> K3s v1.34.4</div>
+                    <div class="badge"><span class="dot dg"></span> OPNsense</div>
+                    <div class="badge"><span class="dot dy"></span> Digi 10G + KEIO 600M</div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Stats bar -->
+        <div class="stats-bar">
+            <div class="stat-card">
+                <div class="sv" style="color:var(--accent)">3</div>
+                <div class="sk">Nodos Proxmox</div>
+            </div>
+            <div class="stat-card">
+                <div class="sv" style="color:var(--accent2)">10</div>
+                <div class="sk">VMs/LXC Running</div>
+            </div>
+            <div class="stat-card">
+                <div class="sv" style="color:var(--accent4)">44</div>
+                <div class="sk">VMs/LXC Total</div>
+            </div>
+            <div class="stat-card">
+                <div class="sv" style="color:#b794f4">5</div>
+                <div class="sk">Templates</div>
+            </div>
+            <div class="stat-card">
+                <div class="sv" style="color:#81e6d9">6</div>
+                <div class="sk">VLANs</div>
+            </div>
+            <div class="stat-card">
+                <div class="sv" style="color:var(--accent3)">2</div>
+                <div class="sk">WAN links</div>
+            </div>
+            <div class="stat-card">
+                <div class="sv" style="color:var(--accent2)">~2.6 TB</div>
+                <div class="sk">Storage total</div>
+            </div>
+            <div class="stat-card">
+                <div class="sv" style="color:var(--accent4)">10G</div>
+                <div class="sk">Ancho de banda</div>
+            </div>
+        </div>
+
+        <!-- Network Diagram -->
+        <div class="net">
+            <div class="net-t"><i class="fa-solid fa-network-wired"></i> &nbsp; Topología de Red — MXHOME</div>
+            <div class="row" style="margin-bottom:4px">
+                <div class="nn" style="border-color:rgba(104,211,145,.35)"><i class="fa-solid fa-tower-broadcast"
+                        style="color:#68d391"></i>
+                    <div class="nm">Digi 10G</div>
+                    <div class="ni">WAN Principal</div>
+                </div>
+                <div class="nn" style="border-color:rgba(251,211,141,.35)"><i class="fa-solid fa-tower-broadcast"
+                        style="color:#fbd38d"></i>
+                    <div class="nm">KEIO 600M</div>
+                    <div class="ni">WAN Failover</div>
+                </div>
+            </div>
+            <div style="display:flex;justify-content:center;gap:120px">
+                <div class="col">
+                    <div class="nl" style="background:linear-gradient(180deg,#68d391,rgba(104,211,145,.2))"></div>
+                </div>
+                <div class="col">
+                    <div class="nl" style="background:linear-gradient(180deg,#fbd38d,rgba(251,211,141,.2))"></div>
+                </div>
+            </div>
+            <div style="display:flex;justify-content:center;margin-bottom:4px">
+                <div class="nn" style="border-color:rgba(252,129,129,.4);background:rgba(252,129,129,.05)">
+                    <i class="fa-solid fa-shield-halved" style="color:#fc8181"></i>
+                    <div class="nm">OPNsense</div>
+                    <div class="ni">VM 102 · pve-M90Q</div>
+                    <div class="ni">192.168.1.1</div>
+                    <span class="pill pg" style="font-size:9px;margin-top:2px"><span class="dot dg"
+                            style="width:5px;height:5px"></span>Running</span>
+                </div>
+            </div>
+            <div class="col" style="align-items:center">
+                <div class="nl"></div>
+            </div>
+            <div style="display:flex;justify-content:center;margin-bottom:4px">
+                <div class="nn" style="border-color:rgba(104,211,145,.3)"><i class="fa-solid fa-sitemap"
+                        style="color:#68d391"></i>
+                    <div class="nm">Core Switch</div>
+                    <div class="ni">VLAN Trunk</div>
+                </div>
+            </div>
+            <div class="row" style="margin-top:16px;gap:10px;align-items:flex-start">
+                <div class="col" style="gap:4px">
+                    <div class="vl vl-b">VLAN 1 · LAN</div>
+                    <div style="font-size:9px;color:var(--muted);font-family:JetBrains Mono,monospace">192.168.1.x</div>
+                    <div class="nl"></div>
+                    <div style="display:flex;flex-direction:column;gap:6px">
+                        <div class="nn"><i class="fa-solid fa-cubes" style="color:#63b3ed"></i>
+                            <div class="nm">pve-m90G1</div>
+                            <div class="ni">192.168.1.7</div>
+                        </div>
+                        <div class="nn"><i class="fa-solid fa-cubes" style="color:#63b3ed"></i>
+                            <div class="nm">pve-M90Q</div>
+                            <div class="ni">192.168.1.x</div>
+                        </div>
+                        <div class="nn"><i class="fa-solid fa-cubes" style="color:#63b3ed"></i>
+                            <div class="nm">pve-Jonsbo</div>
+                            <div class="ni">192.168.1.9</div>
+                        </div>
+                        <div class="nn"><i class="fa-solid fa-database" style="color:#b794f4"></i>
+                            <div class="nm">DSM NAS</div>
+                            <div class="ni">192.168.1.80</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col" style="gap:4px">
+                    <div class="vl" style="color:#fbd38d">VLAN 20 · WAN</div>
+                    <div style="font-size:9px;color:var(--muted);font-family:JetBrains Mono,monospace">Digi 10G</div>
+                    <div class="nl" style="background:linear-gradient(180deg,#fbd38d,rgba(251,211,141,.2))"></div>
+                    <div class="nn" style="border-color:rgba(251,211,141,.3)"><i class="fa-solid fa-plug"
+                            style="color:#fbd38d"></i>
+                        <div class="nm">WAN-A</div>
+                        <div class="ni">uplink</div>
+                    </div>
+                </div>
+                <div class="col" style="gap:4px">
+                    <div class="vl vl-r">VLAN 30 · WAN-B</div>
+                    <div style="font-size:9px;color:var(--muted);font-family:JetBrains Mono,monospace">KEIO 600M</div>
+                    <div class="nl" style="background:linear-gradient(180deg,#fc8181,rgba(252,129,129,.2))"></div>
+                    <div class="nn" style="border-color:rgba(252,129,129,.3)"><i class="fa-solid fa-plug"
+                            style="color:#fc8181"></i>
+                        <div class="nm">WAN-B</div>
+                        <div class="ni">failover</div>
+                    </div>
+                </div>
+                <div class="col" style="gap:4px">
+                    <div class="vl vl-b">VLAN 25 · WiFi</div>
+                    <div style="font-size:9px;color:var(--muted);font-family:JetBrains Mono,monospace">192.168.2.x</div>
+                    <div class="nl" style="background:linear-gradient(180deg,#63b3ed,rgba(99,179,237,.2))"></div>
+                    <div class="nn" style="border-color:rgba(99,179,237,.3)"><i class="fa-solid fa-wifi"
+                            style="color:#63b3ed"></i>
+                        <div class="nm">WiFi AP</div>
+                        <div class="ni">192.168.2.x</div>
+                    </div>
+                </div>
+                <div class="col" style="gap:4px">
+                    <div class="vl vl-g">VLAN 50 · Homelab</div>
+                    <div style="font-size:9px;color:var(--muted);font-family:JetBrains Mono,monospace">192.168.3.x</div>
+                    <div class="nl" style="background:linear-gradient(180deg,#68d391,rgba(104,211,145,.2))"></div>
+                    <div style="display:flex;flex-direction:column;gap:6px">
+                        <div class="nn"><i class="fa-solid fa-dharmachakra" style="color:#68d391"></i>
+                            <div class="nm">k3s-single</div>
+                            <div class="ni">192.168.3.202</div>
+                        </div>
+                        <div class="nn"><i class="fa-solid fa-shield-halved" style="color:#fc8181"></i>
+                            <div class="nm">Ingress LB</div>
+                            <div class="ni">192.168.3.220</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col" style="gap:4px">
+                    <div class="vl vl-p">VLAN 60 · MAAS</div>
+                    <div style="font-size:9px;color:var(--muted);font-family:JetBrains Mono,monospace">10.10.9.x</div>
+                    <div class="nl" style="background:linear-gradient(180deg,#b794f4,rgba(183,148,246,.2))"></div>
+                    <div style="display:flex;flex-direction:column;gap:6px">
+                        <div class="nn"><i class="fa-solid fa-server" style="color:#b794f4"></i>
+                            <div class="nm">maas-ctrl</div>
+                            <div class="ni">10.10.9.x</div>
+                        </div>
+                        <div class="nn"><i class="fa-solid fa-network-wired" style="color:#b794f4"></i>
+                            <div class="nm">juju-ctrl</div>
+                            <div class="ni">10.10.9.x</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Cluster Nodes -->
+        <div class="sec">
+            <div class="sec-t"><i class="fa-solid fa-cubes"></i> Cluster Proxmox VE 9.1 — 3 Nodos (sin nodo principal)
+            </div>
+            <div class="g3">
+                <div class="card">
+                    <div class="node-hdr"><i class="fa-solid fa-cubes"></i>
+                        <div>
+                            <div class="nh">pve-Jonsbo</div>
+                            <div class="ns">192.168.1.9 · 3 VMs/LXC</div>
+                        </div><span class="pill pg" style="margin-left:auto">Online</span>
+                    </div>
+                    <div class="sr"><span class="sk">Storage</span><span class="sv vb">local-zfs + DSM NFS</span></div>
+                    <div class="sr"><span class="sk">Running</span><span class="sv vg">pms · mgmt-ups · unraid</span>
+                    </div>
+                    <div class="sr"><span class="sk">Live Migration</span><span class="sv vg">✓ DSM shared</span></div>
+                </div>
+                <div class="card">
+                    <div class="node-hdr"><i class="fa-solid fa-cubes"></i>
+                        <div>
+                            <div class="nh">pve-M90Q</div>
+                            <div class="ns">192.168.1.x · 17 VMs/LXC</div>
+                        </div><span class="pill pg" style="margin-left:auto">Online</span>
+                    </div>
+                    <div class="sr"><span class="sk">Storage</span><span class="sv vb">local-zfs + DSM NFS</span></div>
+                    <div class="sr"><span class="sk">Running</span><span class="sv vg">OPNsense · HA · docker</span>
+                    </div>
+                    <div class="sr"><span class="sk">Live Migration</span><span class="sv vg">✓ DSM shared</span></div>
+                </div>
+                <div class="card">
+                    <div class="node-hdr"><i class="fa-solid fa-cubes"></i>
+                        <div>
+                            <div class="nh">pve-m90G1</div>
+                            <div class="ns">192.168.1.7 · 34 VMs/LXC</div>
+                        </div><span class="pill pg" style="margin-left:auto">Online</span>
+                    </div>
+                    <div class="sr"><span class="sk">Storage</span><span class="sv vb">local-zfs (616GB) + DSM
+                            NFS</span></div>
+                    <div class="sr"><span class="sk">Running</span><span class="sv vg">Xpenology · immich · openclaw ·
+                            k3s</span></div>
+                    <div class="sr"><span class="sk">Templates cloud-init</span><span class="sv vy">5 optimizados</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- VMs por nodo -->
+        <div class="sec">
+            <div class="sec-t"><i class="fa-solid fa-display"></i> Inventario completo — 44 VMs/LXC en cluster</div>
+
+            <!-- pve-Jonsbo -->
+            <div style="margin-bottom:24px">
+                <div class="node-hdr" style="margin-bottom:12px"><i class="fa-solid fa-cubes"
+                        style="color:var(--accent)"></i>
+                    <div>
+                        <div class="nh">pve-Jonsbo</div>
+                        <div class="ns">3 items · 2 running</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <table class="vt">
+                        <tr>
+                            <th>ID</th>
+                            <th>Tipo</th>
+                            <th>Nombre</th>
+                            <th>RAM</th>
+                            <th>Disco</th>
+                            <th>Estado</th>
+                        </tr>
+                        <tr>
+                            <td class="vy">100</td>
+                            <td><span class="lxc-badge">LXC</span></td>
+                            <td>pms <span style="color:var(--muted);font-size:10px">(Plex Media Server)</span></td>
+                            <td>36 GB</td>
+                            <td>200 GB</td>
+                            <td><span class="pill pg">Running</span></td>
+                        </tr>
+                        <tr>
+                            <td class="vy">103</td>
+                            <td><span class="lxc-badge">LXC</span></td>
+                            <td>mgmt-ups <span style="color:var(--muted);font-size:10px">(UPS management)</span></td>
+                            <td>512 MB</td>
+                            <td>2 GB</td>
+                            <td><span class="pill pg">Running</span></td>
+                        </tr>
+                        <tr>
+                            <td class="vy">114</td>
+                            <td><span class="vm-badge">VM</span></td>
+                            <td>unraid</td>
+                            <td>8 GB</td>
+                            <td>—</td>
+                            <td><span class="pill pg">Running</span></td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <!-- pve-M90Q -->
+            <div style="margin-bottom:24px">
+                <div class="node-hdr" style="margin-bottom:12px"><i class="fa-solid fa-cubes"
+                        style="color:var(--accent)"></i>
+                    <div>
+                        <div class="nh">pve-M90Q</div>
+                        <div class="ns">17 items · 3 running</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <table class="vt">
+                        <tr>
+                            <th>ID</th>
+                            <th>Tipo</th>
+                            <th>Nombre</th>
+                            <th>RAM</th>
+                            <th>Disco</th>
+                            <th>Estado</th>
+                        </tr>
+                        <tr>
+                            <td class="vy">102</td>
+                            <td><span class="vm-badge">VM</span></td>
+                            <td>OPNsense <span style="color:var(--muted);font-size:10px">(Firewall/Router
+                                    principal)</span></td>
+                            <td>4 GB</td>
+                            <td>50 GB</td>
+                            <td><span class="pill pg">Running</span></td>
+                        </tr>
+                        <tr>
+                            <td>104</td>
+                            <td><span class="vm-badge">VM</span></td>
+                            <td>homeassistant</td>
+                            <td>3 GB</td>
+                            <td>32 GB</td>
+                            <td><span class="pill pg">Running</span></td>
+                        </tr>
+                        <tr>
+                            <td>109</td>
+                            <td><span class="lxc-badge">LXC</span></td>
+                            <td>docker</td>
+                            <td>8 GB</td>
+                            <td>20 GB</td>
+                            <td><span class="pill pg">Running</span></td>
+                        </tr>
+                        <tr>
+                            <td>101</td>
+                            <td><span class="vm-badge">VM</span></td>
+                            <td>opnsense <span style="color:var(--muted);font-size:10px">(backup/test)</span></td>
+                            <td>4 GB</td>
+                            <td>37 GB</td>
+                            <td><span class="pill py">Stopped</span></td>
+                        </tr>
+                        <tr>
+                            <td>111</td>
+                            <td><span class="vm-badge">VM</span></td>
+                            <td>rke-manager</td>
+                            <td>4 GB</td>
+                            <td>300 GB</td>
+                            <td><span class="pill py">Stopped</span></td>
+                        </tr>
+                        <tr>
+                            <td>115</td>
+                            <td><span class="vm-badge">VM</span></td>
+                            <td>microstack</td>
+                            <td>17 GB</td>
+                            <td>308 GB</td>
+                            <td><span class="pill py">Stopped</span></td>
+                        </tr>
+                        <tr>
+                            <td>117</td>
+                            <td><span class="vm-badge">VM</span></td>
+                            <td>k3s-2</td>
+                            <td>8 GB</td>
+                            <td>52.2 GB</td>
+                            <td><span class="pill py">Stopped</span></td>
+                        </tr>
+                        <tr>
+                            <td>118</td>
+                            <td><span class="vm-badge">VM</span></td>
+                            <td>nodo1</td>
+                            <td>4 GB</td>
+                            <td>50 GB</td>
+                            <td><span class="pill py">Stopped</span></td>
+                        </tr>
+                        <tr>
+                            <td>120</td>
+                            <td><span class="vm-badge">VM</span></td>
+                            <td>k3s-3</td>
+                            <td>8 GB</td>
+                            <td>52.2 GB</td>
+                            <td><span class="pill py">Stopped</span></td>
+                        </tr>
+                        <tr>
+                            <td>121</td>
+                            <td><span class="lxc-badge">LXC</span></td>
+                            <td>myspeed</td>
+                            <td>1 GB</td>
+                            <td>4 GB</td>
+                            <td><span class="pill py">Stopped</span></td>
+                        </tr>
+                        <tr>
+                            <td>124</td>
+                            <td><span class="lxc-badge">LXC</span></td>
+                            <td>jellyfin</td>
+                            <td>2 GB</td>
+                            <td>30 GB</td>
+                            <td><span class="pill py">Stopped</span></td>
+                        </tr>
+                        <tr>
+                            <td>125</td>
+                            <td><span class="vm-badge">VM</span></td>
+                            <td>nodo2</td>
+                            <td>4 GB</td>
+                            <td>50 GB</td>
+                            <td><span class="pill py">Stopped</span></td>
+                        </tr>
+                        <tr>
+                            <td>127</td>
+                            <td><span class="vm-badge">VM</span></td>
+                            <td>nodolimpio1</td>
+                            <td>8 GB</td>
+                            <td>30 GB</td>
+                            <td><span class="pill py">Stopped</span></td>
+                        </tr>
+                        <tr>
+                            <td>128</td>
+                            <td><span class="vm-badge">VM</span></td>
+                            <td>nodolimpio2</td>
+                            <td>8 GB</td>
+                            <td>30 GB</td>
+                            <td><span class="pill py">Stopped</span></td>
+                        </tr>
+                        <tr>
+                            <td>139</td>
+                            <td><span class="lxc-badge">LXC</span></td>
+                            <td>zoraxy <span style="color:var(--muted);font-size:10px">(reverse proxy)</span></td>
+                            <td>2 GB</td>
+                            <td>6 GB</td>
+                            <td><span class="pill py">Stopped</span></td>
+                        </tr>
+                        <tr>
+                            <td>142</td>
+                            <td><span class="vm-badge">VM</span></td>
+                            <td>PDM</td>
+                            <td>2 GB</td>
+                            <td>60 GB</td>
+                            <td><span class="pill py">Stopped</span></td>
+                        </tr>
+                        <tr>
+                            <td>143</td>
+                            <td><span class="vm-badge">VM</span></td>
+                            <td>Win11</td>
+                            <td>4 GB</td>
+                            <td>64 GB</td>
+                            <td><span class="pill py">Stopped</span></td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <!-- pve-m90G1 -->
+            <div>
+                <div class="node-hdr" style="margin-bottom:12px"><i class="fa-solid fa-cubes"
+                        style="color:var(--accent)"></i>
+                    <div>
+                        <div class="nh">pve-m90G1</div>
+                        <div class="ns">34 items (incl. 5 templates) · 4 running</div>
+                    </div>
+                </div>
+                <div class="g2">
+                    <div class="card">
+                        <div class="ch">
+                            <div class="ci ig"><i class="fa-solid fa-circle-play"></i></div>
+                            <div>
+                                <div class="ct">Running ahora</div>
+                            </div>
+                        </div>
+                        <table class="vt">
+                            <tr>
+                                <th>ID</th>
+                                <th>Tipo</th>
+                                <th>Nombre</th>
+                                <th>RAM</th>
+                                <th>Estado</th>
+                            </tr>
+                            <tr>
+                                <td class="vy">113</td>
+                                <td><span class="vm-badge">VM</span></td>
+                                <td>Xpenology (NAS DSM)</td>
+                                <td>16 GB</td>
+                                <td><span class="pill pg">Running</span></td>
+                            </tr>
+                            <tr>
+                                <td class="vy">122</td>
+                                <td><span class="lxc-badge">LXC</span></td>
+                                <td>immich <span style="color:var(--muted);font-size:10px">(fotos)</span></td>
+                                <td>8 GB</td>
+                                <td><span class="pill pg">Running</span></td>
+                            </tr>
+                            <tr>
+                                <td class="vy">146</td>
+                                <td><span class="vm-badge">VM</span></td>
+                                <td>openclaw (AI agent)</td>
+                                <td>8 GB</td>
+                                <td><span class="pill pg">Running</span></td>
+                            </tr>
+                            <tr>
+                                <td class="vy">200</td>
+                                <td><span class="vm-badge">VM</span></td>
+                                <td>k3s-single</td>
+                                <td>8 GB</td>
+                                <td><span class="pill pg">Running</span></td>
+                            </tr>
+                        </table>
+                    </div>
+                    <div class="card">
+                        <div class="ch">
+                            <div class="ci ip"><i class="fa-solid fa-cloud"></i></div>
+                            <div>
+                                <div class="ct">OpenStack / MAAS / K8s</div>
+                            </div>
+                        </div>
+                        <table class="vt">
+                            <tr>
+                                <th>ID</th>
+                                <th>Nombre</th>
+                                <th>RAM</th>
+                                <th>Disco</th>
+                                <th></th>
+                            </tr>
+                            <tr>
+                                <td>130</td>
+                                <td>maas-controller</td>
+                                <td>4 GB</td>
+                                <td>45 GB</td>
+                                <td><span class="pill py">Off</span></td>
+                            </tr>
+                            <tr>
+                                <td>131</td>
+                                <td>juju-controller</td>
+                                <td>4 GB</td>
+                                <td>25 GB</td>
+                                <td><span class="pill py">Off</span></td>
+                            </tr>
+                            <tr>
+                                <td>132</td>
+                                <td>openstack-node</td>
+                                <td>16 GB</td>
+                                <td>250 GB</td>
+                                <td><span class="pill py">Off</span></td>
+                            </tr>
+                            <tr>
+                                <td>144</td>
+                                <td>devstack</td>
+                                <td>16 GB</td>
+                                <td>52 GB</td>
+                                <td><span class="pill py">Off</span></td>
+                            </tr>
+                            <tr>
+                                <td>116</td>
+                                <td>k3s-1</td>
+                                <td>8 GB</td>
+                                <td>52 GB</td>
+                                <td><span class="pill py">Off</span></td>
+                            </tr>
+                            <tr>
+                                <td>140</td>
+                                <td>Noble-k8s</td>
+                                <td>24 GB</td>
+                                <td>203 GB</td>
+                                <td><span class="pill py">Off</span></td>
+                            </tr>
+                            <tr>
+                                <td>141</td>
+                                <td>noble-k8s-os</td>
+                                <td>32 GB</td>
+                                <td>203 GB</td>
+                                <td><span class="pill py">Off</span></td>
+                            </tr>
+                            <tr>
+                                <td>145</td>
+                                <td>k8s-dgp</td>
+                                <td>8 GB</td>
+                                <td>62 GB</td>
+                                <td><span class="pill py">Off</span></td>
+                            </tr>
+                            <tr>
+                                <td>1100</td>
+                                <td>k3s-remote</td>
+                                <td>2 GB</td>
+                                <td>17 GB</td>
+                                <td><span class="pill py">Off</span></td>
+                            </tr>
+                        </table>
+                    </div>
+                    <div class="card">
+                        <div class="ch">
+                            <div class="ci ic"><i class="fa-solid fa-box"></i></div>
+                            <div>
+                                <div class="ct">LXCs de servicios</div>
+                            </div>
+                        </div>
+                        <table class="vt">
+                            <tr>
+                                <th>ID</th>
+                                <th>Nombre</th>
+                                <th>RAM</th>
+                                <th>Disco</th>
+                                <th></th>
+                            </tr>
+                            <tr>
+                                <td>110</td>
+                                <td>prometheus</td>
+                                <td>512 MB</td>
+                                <td>8 GB</td>
+                                <td><span class="pill py">Off</span></td>
+                            </tr>
+                            <tr>
+                                <td>112</td>
+                                <td>grafana</td>
+                                <td>512 MB</td>
+                                <td>8 GB</td>
+                                <td><span class="pill py">Off</span></td>
+                            </tr>
+                            <tr>
+                                <td>123</td>
+                                <td>notifiarr</td>
+                                <td>512 MB</td>
+                                <td>2 GB</td>
+                                <td><span class="pill py">Off</span></td>
+                            </tr>
+                            <tr>
+                                <td>138</td>
+                                <td>n8n</td>
+                                <td>4 GB</td>
+                                <td>25 GB</td>
+                                <td><span class="pill py">Off</span></td>
+                            </tr>
+                        </table>
+                    </div>
+                    <div class="card">
+                        <div class="ch">
+                            <div class="ci iy"><i class="fa-solid fa-flask"></i></div>
+                            <div>
+                                <div class="ct">Lab / Dev / Test</div>
+                            </div>
+                        </div>
+                        <table class="vt">
+                            <tr>
+                                <th>ID</th>
+                                <th>Nombre</th>
+                                <th>RAM</th>
+                                <th>Disco</th>
+                                <th></th>
+                            </tr>
+                            <tr>
+                                <td>105</td>
+                                <td>node1</td>
+                                <td>8 GB</td>
+                                <td>48 GB</td>
+                                <td><span class="pill py">Off</span></td>
+                            </tr>
+                            <tr>
+                                <td>106</td>
+                                <td>node2</td>
+                                <td>8 GB</td>
+                                <td>56 GB</td>
+                                <td><span class="pill py">Off</span></td>
+                            </tr>
+                            <tr>
+                                <td>107</td>
+                                <td>node3</td>
+                                <td>8 GB</td>
+                                <td>56 GB</td>
+                                <td><span class="pill py">Off</span></td>
+                            </tr>
+                            <tr>
+                                <td>108</td>
+                                <td>hard</td>
+                                <td>4 GB</td>
+                                <td>13 GB</td>
+                                <td><span class="pill py">Off</span></td>
+                            </tr>
+                            <tr>
+                                <td>119</td>
+                                <td>Win10-Work</td>
+                                <td>8 GB</td>
+                                <td>—</td>
+                                <td><span class="pill py">Off</span></td>
+                            </tr>
+                            <tr>
+                                <td>126</td>
+                                <td>nodo3</td>
+                                <td>4 GB</td>
+                                <td>50 GB</td>
+                                <td><span class="pill py">Off</span></td>
+                            </tr>
+                            <tr>
+                                <td>129</td>
+                                <td>nodolimpio3</td>
+                                <td>8 GB</td>
+                                <td>30 GB</td>
+                                <td><span class="pill py">Off</span></td>
+                            </tr>
+                            <tr>
+                                <td>133</td>
+                                <td>gitlab-server</td>
+                                <td>8 GB</td>
+                                <td>60 GB</td>
+                                <td><span class="pill py">Off</span></td>
+                            </tr>
+                            <tr>
+                                <td>134-137</td>
+                                <td>test / test2 / test3 / tst</td>
+                                <td>1-2 GB</td>
+                                <td>3-32 GB</td>
+                                <td><span class="pill py">Off</span></td>
+                            </tr>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Storage -->
+        <div class="sec">
+            <div class="sec-t"><i class="fa-solid fa-hard-drive"></i> Storage</div>
+            <div class="g2">
+                <div class="card">
+                    <div class="ch">
+                        <div class="ci ip"><i class="fa-solid fa-database"></i></div>
+                        <div>
+                            <div class="ct">DSM NAS — Xpenology (VM 113)</div>
+                            <div class="cs">NFS · 192.168.1.80 · /volume1/Proxmox</div>
+                        </div>
+                    </div>
+                    <div class="sr"><span class="sk">Tipo</span><span class="sv vp">NFS compartido (3 nodos)</span>
+                    </div>
+                    <div class="sr"><span class="sk">Contenido</span><span class="sv">ISOs · Backups · Templates ·
+                            Images</span></div>
+                    <div class="sr"><span class="sk">Libre</span><span class="sv vg">~2 TB</span></div>
+                    <div class="sr"><span class="sk">HA / Live Migration</span><span class="sv vg">✓</span></div>
+                    <div class="prog">
+                        <div class="pf pfy" style="width:12%"></div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="ch">
+                        <div class="ci ic"><i class="fa-solid fa-layer-group"></i></div>
+                        <div>
+                            <div class="ct">local-zfs — rpool/data (pve-m90G1)</div>
+                            <div class="cs">ZFS zvols · NVMe local</div>
+                        </div>
+                    </div>
+                    <div class="sr"><span class="sk">Compresión lz4</span><span class="sv vg">~1.5–1.7x activa</span>
+                    </div>
+                    <div class="sr"><span class="sk">Libre</span><span class="sv vg">616 GB</span></div>
+                    <div class="sr"><span class="sk">Snapshots</span><span class="sv vg">✓ Nativos ZFS</span></div>
+                    <div class="sr"><span class="sk">Live Migration</span><span class="sv vg">✓ DSM shared (3
+                            nodos)</span>
+                        <div class="prog">
+                            <div class="pf pfb" style="width:25%"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Templates -->
+            <div class="sec">
+                <div class="sec-t"><i class="fa-solid fa-clone"></i> Cloud-Init Templates — local-zfs · pve-m90G1</div>
+                <div class="g5">
+                    <div class="tmpl-c">
+                        <div style="font-size:26px">🐧</div>
+                        <div>
+                            <div style="font-size:13px;font-weight:600">Ubuntu 24.04 LTS</div>
+                            <div style="font-size:11px;color:var(--muted);font-family:JetBrains Mono,monospace">1.27GB ·
+                                20GB disk</div>
+                        </div>
+                        <div class="tid">#9012</div>
+                    </div>
+                    <div class="tmpl-c">
+                        <div style="font-size:26px">🌀</div>
+                        <div>
+                            <div style="font-size:13px;font-weight:600">Debian 12</div>
+                            <div style="font-size:11px;color:var(--muted);font-family:JetBrains Mono,monospace">683MB ·
+                                20GB disk</div>
+                        </div>
+                        <div class="tid">#9013</div>
+                    </div>
+                    <div class="tmpl-c">
+                        <div style="font-size:26px">🪨</div>
+                        <div>
+                            <div style="font-size:13px;font-weight:600">Rocky Linux 9</div>
+                            <div style="font-size:11px;color:var(--muted);font-family:JetBrains Mono,monospace">920MB ·
+                                20GB disk</div>
+                        </div>
+                        <div class="tid">#9003</div>
+                    </div>
+                    <div class="tmpl-c">
+                        <div style="font-size:26px">⭐</div>
+                        <div>
+                            <div style="font-size:13px;font-weight:600">AlmaLinux 9</div>
+                            <div style="font-size:11px;color:var(--muted);font-family:JetBrains Mono,monospace">822MB ·
+                                20GB disk</div>
+                        </div>
+                        <div class="tid">#9014</div>
+                    </div>
+                    <div class="tmpl-c">
+                        <div style="font-size:26px">🏔️</div>
+                        <div>
+                            <div class="ct" style="font-size:13px">Alpine Linux 3.21</div>
+                            <div style="font-size:11px;color:var(--muted);font-family:JetBrains Mono,monospace">138MB ·
+                                8GB disk</div>
+                        </div>
+                        <div class="tid">#9015</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- K3s -->
+            <div class="sec">
+                <div class="sec-t"><i class="fa-solid fa-dharmachakra"></i> Kubernetes — k3s-single · VLAN 50</div>
+                <div class="g2">
+                    <div class="card">
+                        <div class="ch">
+                            <div class="ci ig"><i class="fa-solid fa-dharmachakra"></i></div>
+                            <div>
+                                <div class="ct">k3s-single (VM 200)</div>
+                                <div class="cs">Ubuntu 24.04 · 192.168.3.202 · pve-m90G1</div>
+                            </div><span class="pill pg" style="margin-left:auto"><span class="dot dg"
+                                    style="width:5px;height:5px"></span>Ready</span>
+                        </div>
+                        <div class="sr"><span class="sk">k3s</span><span class="sv vg">v1.34.4+k3s1</span></div>
+                        <div class="sr"><span class="sk">Helm</span><span class="sv vy">v3.20.0</span></div>
+                        <div class="sr"><span class="sk">CPU / RAM</span><span class="sv">4 vCPU · 8 GB</span></div>
+                        <div class="sr"><span class="sk">Disco</span><span class="sv vg">50 GB ZFS</span></div>
+                    </div>
+                    <div class="card">
+                        <div class="ch">
+                            <div class="ci ib"><i class="fa-solid fa-cubes-stacked"></i></div>
+                            <div>
+                                <div class="ct">Stack instalado</div>
+                            </div>
+                        </div>
+                        <table class="vt">
+                            <tr>
+                                <th>Componente</th>
+                                <th>Versión</th>
+                                <th>IP/Info</th>
+                                <th>Estado</th>
+                            </tr>
+                            <tr>
+                                <td>MetalLB</td>
+                                <td>v0.14.9</td>
+                                <td>.220–.240</td>
+                                <td><span class="pill pg">Running</span></td>
+                            </tr>
+                            <tr>
+                                <td>Ingress NGINX</td>
+                                <td>latest</td>
+                                <td>192.168.3.220</td>
+                                <td><span class="pill pg">Running</span></td>
+                            </tr>
+                            <tr>
+                                <td>cert-manager</td>
+                                <td>v1.19.4</td>
+                                <td>—</td>
+                                <td><span class="pill pg">Running</span></td>
+                            </tr>
+                            <tr>
+                                <td>metrics-server</td>
+                                <td>built-in</td>
+                                <td>—</td>
+                                <td><span class="pill pg">Running</span></td>
+                            </tr>
+                            <tr>
+                                <td>mxhome dashboard</td>
+                                <td>1.0</td>
+                                <td>mxhome.local</td>
+                                <td><span class="pill pg">Running</span></td>
+                            </tr>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <footer>
+                <p>MXHOME Infrastructure Dashboard &nbsp;·&nbsp; <span>OPNsense</span> + <span>Proxmox VE 9.1
+                        Cluster</span> + <span>K3s</span> + <span>openclaw AI</span></p>
+                <p style="margin-top:6px;font-size:11px;color:#4a5568">Dual WAN (Digi 10G + KEIO 600M) &nbsp;·&nbsp; 6
+                    VLANs &nbsp;·&nbsp; 3 Proxmox nodes &nbsp;·&nbsp; 44 VMs/LXC &nbsp;·&nbsp; 5 Templates &nbsp;·&nbsp;
+                    2026</p>
+            </footer>
+        </div>
+</body>
+
+</html>
