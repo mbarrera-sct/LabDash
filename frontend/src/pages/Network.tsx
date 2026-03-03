@@ -33,8 +33,10 @@ export default function Network({ onToast }: Props) {
     const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
     const [editMode, setEditMode] = useState(false)
     const [saving, setSaving] = useState(false)
-    const [addingEdge, setAddingEdge] = useState(false)
     const [showAddNode, setShowAddNode] = useState(false)
+    const [showTemplates, setShowTemplates] = useState(false)
+    const [templates, setTemplates] = useState<{ id: string; name: string; description: string }[]>([])
+    const [loadingTpl, setLoadingTpl] = useState(false)
     const [newNode, setNewNode] = useState({ name: '', ip: '', type: 'server' })
     const rfWrapper = useRef<HTMLDivElement>(null)
 
@@ -51,6 +53,11 @@ export default function Network({ onToast }: Props) {
             if (d.edges?.length) setEdges(d.edges)
         }).catch(() => { })
     }, [setNodes, setEdges])
+
+    // Load template list once
+    useEffect(() => {
+        api.listTemplates().then(setTemplates).catch(() => { })
+    }, [])
 
     const onConnect = useCallback(
         (params: Connection) => setEdges(eds => addEdge({
@@ -70,6 +77,20 @@ export default function Network({ onToast }: Props) {
         } catch {
             onToast('error', 'Error al guardar el diagrama')
         } finally { setSaving(false) }
+    }
+
+    const handleLoadTemplate = async (id: string) => {
+        if (!confirm('¿Cargar este template? Reemplazará el diagrama actual (no guardado).')) return
+        setLoadingTpl(true)
+        try {
+            const d = await api.loadTemplate(id)
+            setNodes((d.nodes as Node[]) || [])
+            setEdges((d.edges as Edge[]) || [])
+            setShowTemplates(false)
+            onToast('success', '✓ Template cargado — guárdalo cuando estés listo')
+        } catch {
+            onToast('error', 'Error cargando template')
+        } finally { setLoadingTpl(false) }
     }
 
     const handleAddNode = () => {
@@ -92,7 +113,10 @@ export default function Network({ onToast }: Props) {
     }
 
     return (
-        <div style={{ position: 'relative', height: 'calc(100vh - 100px)', borderRadius: 16, overflow: 'hidden', border: '1px solid var(--border)' }} ref={rfWrapper}>
+        <div
+            style={{ position: 'relative', height: 'calc(100vh - 100px)', borderRadius: 16, overflow: 'hidden', border: '1px solid var(--border)' }}
+            ref={rfWrapper}
+        >
             <ReactFlow
                 nodes={nodes}
                 edges={edges}
@@ -117,23 +141,34 @@ export default function Network({ onToast }: Props) {
                     style={{ background: 'var(--bg2)' }}
                 />
 
-                {/* Left toolbar */}
+                {/* ── Left toolbar ── */}
                 <Panel position="top-left">
                     <div className="diagram-toolbar">
+                        {/* View / Edit toggle */}
                         <button
                             className={`btn ${editMode ? 'btn-primary' : 'btn-secondary'}`}
-                            onClick={() => setEditMode(e => !e)}
+                            onClick={() => { setEditMode(e => !e); setShowAddNode(false); setShowTemplates(false) }}
                         >
                             <i className={`fa-solid ${editMode ? 'fa-pen-to-square' : 'fa-eye'}`} />
                             {editMode ? 'Editando' : 'Ver'}
                         </button>
 
+                        {/* Templates button (always visible) */}
+                        <button
+                            className={`btn ${showTemplates ? 'btn-primary' : 'btn-secondary'}`}
+                            onClick={() => { setShowTemplates(s => !s); setShowAddNode(false) }}
+                            title="Cargar template de topología"
+                        >
+                            <i className="fa-solid fa-layer-group" />
+                            Templates
+                        </button>
+
                         {editMode && <>
-                            <button className="btn btn-secondary" onClick={() => setShowAddNode(s => !s)}>
+                            <button className="btn btn-secondary" onClick={() => { setShowAddNode(s => !s); setShowTemplates(false) }}>
                                 <i className="fa-solid fa-plus" /> Nodo
                             </button>
                             <button className="btn btn-danger" onClick={handleDeleteSelected}>
-                                <i className="fa-solid fa-trash" /> Borrar
+                                <i className="fa-solid fa-trash" /> Borrar sel.
                             </button>
                             <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
                                 <i className={`fa-solid ${saving ? 'fa-spinner fa-spin' : 'fa-floppy-disk'}`} />
@@ -143,7 +178,66 @@ export default function Network({ onToast }: Props) {
                     </div>
                 </Panel>
 
-                {/* Add node panel */}
+                {/* ── Templates panel ── */}
+                {showTemplates && (
+                    <Panel position="top-right">
+                        <div className="diagram-node-panel" style={{ minWidth: 300 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+                                <h4 style={{ margin: 0 }}>
+                                    <i className="fa-solid fa-layer-group" style={{ marginRight: 8, color: 'var(--accent5)' }} />
+                                    Templates de topología
+                                </h4>
+                                <button
+                                    className="btn btn-secondary"
+                                    style={{ padding: '3px 8px', fontSize: 11 }}
+                                    onClick={() => setShowTemplates(false)}
+                                >
+                                    <i className="fa-solid fa-xmark" />
+                                </button>
+                            </div>
+
+                            {templates.length === 0 ? (
+                                <p style={{ color: 'var(--muted)', fontSize: 12 }}>No hay templates disponibles</p>
+                            ) : (
+                                templates.map(t => (
+                                    <div key={t.id} style={{
+                                        background: 'rgba(255,255,255,0.03)',
+                                        border: '1px solid var(--border)',
+                                        borderRadius: 10,
+                                        padding: '12px 14px',
+                                        marginBottom: 10,
+                                    }}>
+                                        <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 4 }}>
+                                            <i className="fa-solid fa-network-wired" style={{ marginRight: 7, color: 'var(--accent)' }} />
+                                            {t.name}
+                                        </div>
+                                        <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 10, lineHeight: 1.5 }}>
+                                            {t.description}
+                                        </div>
+                                        <button
+                                            className="btn btn-primary"
+                                            style={{ width: '100%', justifyContent: 'center' }}
+                                            onClick={() => handleLoadTemplate(t.id)}
+                                            disabled={loadingTpl}
+                                        >
+                                            {loadingTpl
+                                                ? <><i className="fa-solid fa-spinner fa-spin" /> Cargando…</>
+                                                : <><i className="fa-solid fa-download" /> Cargar este template</>
+                                            }
+                                        </button>
+                                    </div>
+                                ))
+                            )}
+
+                            <div style={{ marginTop: 10, padding: '10px 12px', background: 'rgba(99,179,237,0.07)', borderRadius: 8, fontSize: 11, color: 'var(--muted)', lineHeight: 1.5 }}>
+                                <i className="fa-solid fa-circle-info" style={{ marginRight: 6, color: 'var(--accent)' }} />
+                                Cargar reemplaza el diagrama actual. Guarda antes si tienes cambios.
+                            </div>
+                        </div>
+                    </Panel>
+                )}
+
+                {/* ── Add node panel ── */}
                 {editMode && showAddNode && (
                     <Panel position="top-right">
                         <div className="diagram-node-panel">
@@ -203,13 +297,16 @@ export default function Network({ onToast }: Props) {
                     </Panel>
                 )}
 
-                {/* Hint when empty */}
+                {/* ── Empty hint ── */}
                 {nodes.length === 0 && (
                     <Panel position="bottom-center">
-                        <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, padding: '12px 24px', color: 'var(--muted)', fontSize: 13, textAlign: 'center' }}>
-                            {editMode
-                                ? '→ Haz clic en "+ Nodo" para añadir dispositivos al diagrama'
-                                : 'Activa el modo Edición para construir tu topología de red'}
+                        <div style={{
+                            background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12,
+                            padding: '12px 24px', color: 'var(--muted)', fontSize: 13, textAlign: 'center',
+                        }}>
+                            <i className="fa-solid fa-layer-group" style={{ marginRight: 8, color: 'var(--accent5)' }} />
+                            Carga el template <strong style={{ color: 'var(--text)' }}>MXHOME</strong> o activa{' '}
+                            <strong style={{ color: 'var(--text)' }}>modo Edición</strong> para construir tu propia topología
                         </div>
                     </Panel>
                 )}

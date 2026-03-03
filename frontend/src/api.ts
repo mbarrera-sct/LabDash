@@ -32,6 +32,8 @@ export const api = {
     haStates: () => get('/api/ha/states'),
     getDiagram: () => get('/api/diagram'),
     saveDiagram: (d: unknown) => post('/api/diagram', d),
+    listTemplates: () => get<{ id: string; name: string; description: string }[]>('/api/templates'),
+    loadTemplate: (id: string) => get<{ nodes: unknown[]; edges: unknown[] }>(`/api/templates/${id}`),
     getSettings: () => get('/api/settings'),
     saveSettings: (s: Record<string, string>) => post('/api/settings', s),
 }
