@@ -14,23 +14,25 @@ metadata:
   namespace: labdash
 type: Opaque
 stringData:
-  PVE_URL:      "https://192.168.1.7:8006"
-  PVE_USER:     "root@pam"
-  PVE_PASS:     ""
-  OPN_URL:      "https://192.168.1.1"
-  OPN_KEY:      ""
-  OPN_SECRET:   ""
-  K8S_URL:      ""
-  K8S_TOKEN:    ""
-  UNRAID_URL:   ""
-  UNRAID_KEY:   ""
-  PLEX_URL:     ""
-  PLEX_TOKEN:   ""
-  IMMICH_URL:   ""
-  IMMICH_KEY:   ""
-  HA_URL:       ""
-  HA_TOKEN:     ""
-  HA_ENTITIES:  ""
+  PVE_URL:        "https://192.168.1.7:8006"
+  PVE_USER:       "root@pam"
+  PVE_PASS:       ""
+  OPN_URL:        "https://192.168.1.1"
+  OPN_KEY:        ""
+  OPN_SECRET:     ""
+  K8S_URL:        ""
+  K8S_TOKEN:      ""
+  UNRAID_URL:     ""
+  UNRAID_KEY:     ""
+  PLEX_URL:       ""
+  PLEX_TOKEN:     ""
+  IMMICH_URL:     ""
+  IMMICH_KEY:     ""
+  HA_URL:         ""
+  HA_TOKEN:       ""
+  HA_ENTITIES:    ""
+  LABDASH_USER:   "admin"
+  LABDASH_PASS:   "changeme"
 
 ---
 # ─── PVC (SQLite persistence) ────────────────────────────────────────────────
@@ -102,8 +104,8 @@ spec:
       serviceAccountName: labdash
       containers:
         - name: labdash
-          image: ghcr.io/mbarrera-sct/labdash:latest  # cambia a tu imagen
-          imagePullPolicy: Always
+          image: miguelix/labdash:1.2
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
           envFrom:
@@ -162,17 +164,22 @@ metadata:
   name: labdash
   namespace: labdash
   annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
 spec:
   ingressClassName: nginx
+  tls:
+  - hosts:
+    - labdash.cloud.mielito.com
+    secretName: labdash-tls-prod
   rules:
-    - host: dash.home.local   # ← cambia a tu hostname
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: labdash
-                port:
-                  number: 80
+  - host: labdash.cloud.mielito.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: labdash
+            port:
+              number: 80

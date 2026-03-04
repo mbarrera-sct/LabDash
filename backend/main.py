@@ -3,21 +3,206 @@ import asyncio, os, time
 from collections import defaultdict
 from pathlib import Path
 from contextlib import asynccontextmanager
+from typing import Annotated
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Request, status
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-import db, proxmox, opnsense, k8s, unraid, plex, immich, homeassistant, templates
+import db, proxmox, opnsense, k8s, unraid, plex, immich, homeassistant, templates, auth
 
 FRONTEND = Path(__file__).parent.parent / "frontend" / "dist"
+
+# ── Public paths (no auth required) ──────────────────────────────────────────
+PUBLIC_PREFIXES = ("/healthz", "/api/auth/", "/assets/")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.init_db()
+    await db.purge_expired_sessions()
+    await auth.create_admin_if_needed()
     yield
 
 app = FastAPI(title="LabDash", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Auth middleware ───────────────────────────────────────────────────────────
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    # Allow public paths
+    if any(path.startswith(p) for p in PUBLIC_PREFIXES):
+        return await call_next(request)
+    # Allow SPA root + non-api paths
+    if not path.startswith("/api/"):
+        return await call_next(request)
+    # Require auth for all /api/* except /api/auth/*
+    token = None
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    if not token:
+        token = request.cookies.get("labdash_session")
+    if not token:
+        return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+    user = await auth.verify_session(token)
+    if not user:
+        return JSONResponse({"detail": "Session expired"}, status_code=401)
+    request.state.user = user
+    return await call_next(request)
+
+# ── Pydantic models ───────────────────────────────────────────────────────────
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class TotpVerifyRequest(BaseModel):
+    temp_token: str
+    code: str
+
+class TotpSetupConfirmRequest(BaseModel):
+    temp_token: str
+    code: str
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+# ── Auth routes ───────────────────────────────────────────────────────────────
+@app.post("/api/auth/login")
+async def login(body: LoginRequest, request: Request):
+    ip = request.client.host if request.client else "unknown"
+    auth.check_rate_limit(ip)
+
+    user = await db.get_user_by_username(body.username)
+    if not user or not auth.verify_password(body.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    auth.clear_rate_limit(ip)
+    temp_token = await auth.create_session(user["id"], is_temp=True)
+
+    return {
+        "temp_token": temp_token,
+        "needs_totp": bool(user["totp_enabled"]),
+        "needs_totp_setup": not bool(user["totp_enabled"]),
+    }
+
+@app.post("/api/auth/verify-totp")
+async def verify_totp(body: TotpVerifyRequest):
+    user = await auth.verify_session(body.temp_token, require_temp=True)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired temp token")
+    if not user["totp_enabled"] or not user["totp_secret"]:
+        raise HTTPException(status_code=400, detail="TOTP not configured")
+    if not auth.verify_totp(user["totp_secret"], body.code):
+        raise HTTPException(status_code=401, detail="Invalid TOTP code")
+    # Delete temp session, create real session
+    await db.delete_session(body.temp_token)
+    token = await auth.create_session(user["id"], is_temp=False)
+    return {"token": token, "username": user["username"]}
+
+@app.get("/api/auth/totp-setup")
+async def get_totp_setup(request: Request):
+    """Returns TOTP secret + URI for QR code. Stores pending secret."""
+    temp_token = request.headers.get("X-Temp-Token")
+    if not temp_token:
+        raise HTTPException(status_code=401, detail="Missing temp token")
+    user = await auth.verify_session(temp_token, require_temp=True)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired temp token")
+
+    # Generate (or reuse pending) secret
+    secret = user["totp_secret"] or auth.generate_totp_secret()
+    await db.set_totp_secret(user["id"], secret)
+    uri = auth.get_totp_uri(secret, user["username"])
+    return {"secret": secret, "uri": uri, "username": user["username"]}
+
+@app.post("/api/auth/totp-setup")
+async def confirm_totp_setup(body: TotpSetupConfirmRequest):
+    user = await auth.verify_session(body.temp_token, require_temp=True)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired temp token")
+    secret = user["totp_secret"]
+    if not secret:
+        raise HTTPException(status_code=400, detail="TOTP setup not started")
+    if not auth.verify_totp(secret, body.code):
+        raise HTTPException(status_code=401, detail="Invalid TOTP code — check your authenticator")
+    await db.enable_totp(user["id"], secret)
+    await db.delete_session(body.temp_token)
+    token = await auth.create_session(user["id"], is_temp=False)
+    return {"token": token, "username": user["username"]}
+
+@app.get("/api/auth/me")
+async def me(request: Request):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return {"username": user["username"], "totp_enabled": bool(user["totp_enabled"])}
+
+@app.post("/api/auth/logout")
+async def logout(request: Request):
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header[7:] if auth_header.startswith("Bearer ") else request.cookies.get("labdash_session", "")
+    if token:
+        await db.delete_session(token)
+    return {"ok": True}
+
+@app.post("/api/auth/change-password")
+async def change_password(body: ChangePasswordRequest, request: Request):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    if not auth.verify_password(body.current_password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Current password incorrect")
+    new_hash = auth.hash_password(body.new_password)
+    await db.update_user_password(user["id"], new_hash)
+    return {"ok": True}
+
+@app.post("/api/auth/disable-totp")
+async def disable_totp_route(request: Request):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    await db.disable_totp(user["id"])
+    return {"ok": True}
+
+@app.get("/api/auth/totp-qr")
+async def totp_qr(request: Request):
+    """Return a QR code PNG for the TOTP provisioning URI.
+    Requires X-Temp-Token header (same as totp-setup).
+    Frontend can use as: <img src="/api/auth/totp-qr" headers={X-Temp-Token: ...}>
+    — but since img tags can't set headers we use a signed approach:
+    the client first calls GET /api/auth/totp-setup to get the URI,
+    then encodes the URI as a query param here.
+    """
+    import io, qrcode
+    from fastapi.responses import StreamingResponse
+
+    uri = request.query_params.get("uri", "")
+    if not uri or not uri.startswith("otpauth://"):
+        raise HTTPException(status_code=400, detail="Missing or invalid uri param")
+
+    qr = qrcode.QRCode(box_size=8, border=2,
+                       error_correction=qrcode.constants.ERROR_CORRECT_M)
+    qr.add_data(uri)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="#0a0a0a", back_color="#ffffff")
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/png",
+                             headers={"Cache-Control": "no-store"})
+
 
 # ──────────────────────────────────────────────────────────────
 # Healthz

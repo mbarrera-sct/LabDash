@@ -112,6 +112,18 @@ export default function Network({ onToast }: Props) {
         setEdges(es => es.filter(e => !e.selected))
     }
 
+    const handleExport = () => {
+        const data = JSON.stringify({ nodes, edges }, null, 2)
+        const blob = new Blob([data], { type: 'application/json' })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `labdash-network-${new Date().toISOString().slice(0, 10)}.json`
+        a.click()
+        URL.revokeObjectURL(url)
+        onToast('success', '✓ Diagrama exportado como JSON')
+    }
+
     return (
         <div
             style={{ position: 'relative', height: 'calc(100vh - 100px)', borderRadius: 16, overflow: 'hidden', border: '1px solid var(--border)' }}
@@ -161,6 +173,17 @@ export default function Network({ onToast }: Props) {
                         >
                             <i className="fa-solid fa-layer-group" />
                             Templates
+                        </button>
+
+                        {/* Export button (always visible) */}
+                        <button
+                            className="btn btn-secondary"
+                            onClick={handleExport}
+                            title="Exportar diagrama como JSON"
+                            disabled={nodes.length === 0}
+                        >
+                            <i className="fa-solid fa-file-export" />
+                            Exportar
                         </button>
 
                         {editMode && <>

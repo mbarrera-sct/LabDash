@@ -306,10 +306,80 @@ MXHOME_TOPOLOGY: dict = {
     ],
 }
 
+SMALL_OFFICE_TOPOLOGY: dict = {
+    "nodes": [
+        {"id": "so-isp",   "type": "infra", "position": {"x": 300, "y": 40},
+         "data": {"label": "ISP",          "ip": "WAN",          "ntype": "wan",     "icon": "fa-tower-broadcast", "color": "#68d391"}},
+        {"id": "so-fw",    "type": "infra", "position": {"x": 300, "y": 180},
+         "data": {"label": "Firewall",     "ip": "192.168.0.1",  "ntype": "router",  "icon": "fa-shield-halved",   "color": "#fc8181"}},
+        {"id": "so-sw",    "type": "infra", "position": {"x": 300, "y": 320},
+         "data": {"label": "Core Switch",  "ip": "L2",           "ntype": "switch",  "icon": "fa-sitemap",         "color": "#68d391"}},
+        {"id": "so-wifi",  "type": "infra", "position": {"x": 80,  "y": 460},
+         "data": {"label": "WiFi AP",      "ip": "192.168.0.50", "ntype": "wifi",    "icon": "fa-wifi",            "color": "#63b3ed"}},
+        {"id": "so-srv1",  "type": "infra", "position": {"x": 240, "y": 460},
+         "data": {"label": "Server 01",    "ip": "192.168.0.10", "ntype": "server",  "icon": "fa-server",          "color": "#63b3ed"}},
+        {"id": "so-srv2",  "type": "infra", "position": {"x": 380, "y": 460},
+         "data": {"label": "Server 02",    "ip": "192.168.0.11", "ntype": "server",  "icon": "fa-server",          "color": "#63b3ed"}},
+        {"id": "so-srv3",  "type": "infra", "position": {"x": 520, "y": 460},
+         "data": {"label": "Server 03",    "ip": "192.168.0.12", "ntype": "server",  "icon": "fa-server",          "color": "#63b3ed"}},
+        {"id": "so-nas",   "type": "infra", "position": {"x": 300, "y": 600},
+         "data": {"label": "NAS",          "ip": "192.168.0.20", "ntype": "nas",     "icon": "fa-database",        "color": "#b794f4"}},
+    ],
+    "edges": [
+        {"id": "e1", "source": "so-isp",  "target": "so-fw",   "animated": True,  "style": {"stroke": "#68d391", "strokeWidth": 2}},
+        {"id": "e2", "source": "so-fw",   "target": "so-sw",   "animated": True,  "style": {"stroke": "#fc8181", "strokeWidth": 2}},
+        {"id": "e3", "source": "so-sw",   "target": "so-wifi", "animated": False, "style": {"stroke": "#63b3ed", "strokeWidth": 1}},
+        {"id": "e4", "source": "so-sw",   "target": "so-srv1", "animated": False, "style": {"stroke": "#63b3ed", "strokeWidth": 1}},
+        {"id": "e5", "source": "so-sw",   "target": "so-srv2", "animated": False, "style": {"stroke": "#63b3ed", "strokeWidth": 1}},
+        {"id": "e6", "source": "so-sw",   "target": "so-srv3", "animated": False, "style": {"stroke": "#63b3ed", "strokeWidth": 1}},
+        {"id": "e7", "source": "so-sw",   "target": "so-nas",  "animated": False, "style": {"stroke": "#b794f4", "strokeWidth": 1}},
+    ],
+}
+
+K8S_CLUSTER_TOPOLOGY: dict = {
+    "nodes": [
+        {"id": "k-gw",     "type": "infra", "position": {"x": 300, "y": 40},
+         "data": {"label": "Gateway",       "ip": "192.168.100.1",  "ntype": "router", "icon": "fa-shield-halved", "color": "#fc8181"}},
+        {"id": "k-sw",     "type": "infra", "position": {"x": 300, "y": 180},
+         "data": {"label": "Switch",        "ip": "L2",              "ntype": "switch", "icon": "fa-sitemap",      "color": "#68d391"}},
+        {"id": "k-cp",     "type": "infra", "position": {"x": 300, "y": 320},
+         "data": {"label": "control-plane", "ip": "192.168.100.10",  "ntype": "k8s",    "icon": "fa-dharmachakra", "color": "#68d391"}},
+        {"id": "k-w1",     "type": "infra", "position": {"x": 80,  "y": 460},
+         "data": {"label": "worker-01",     "ip": "192.168.100.11",  "ntype": "k8s",    "icon": "fa-dharmachakra", "color": "#63b3ed"}},
+        {"id": "k-w2",     "type": "infra", "position": {"x": 300, "y": 460},
+         "data": {"label": "worker-02",     "ip": "192.168.100.12",  "ntype": "k8s",    "icon": "fa-dharmachakra", "color": "#63b3ed"}},
+        {"id": "k-w3",     "type": "infra", "position": {"x": 520, "y": 460},
+         "data": {"label": "worker-03",     "ip": "192.168.100.13",  "ntype": "k8s",    "icon": "fa-dharmachakra", "color": "#63b3ed"}},
+        {"id": "k-lb",     "type": "infra", "position": {"x": 80,  "y": 600},
+         "data": {"label": "Ingress / LB",  "ip": "192.168.100.200", "ntype": "generic","icon": "fa-shield-halved","color": "#fc8181"}},
+        {"id": "k-nfs",    "type": "infra", "position": {"x": 520, "y": 600},
+         "data": {"label": "NFS Storage",   "ip": "192.168.100.80",  "ntype": "nas",    "icon": "fa-database",    "color": "#b794f4"}},
+    ],
+    "edges": [
+        {"id": "e1", "source": "k-gw",  "target": "k-sw",  "animated": True,  "style": {"stroke": "#fc8181", "strokeWidth": 2}},
+        {"id": "e2", "source": "k-sw",  "target": "k-cp",  "animated": True,  "style": {"stroke": "#68d391", "strokeWidth": 2}},
+        {"id": "e3", "source": "k-cp",  "target": "k-w1",  "animated": True,  "style": {"stroke": "#63b3ed", "strokeWidth": 1}},
+        {"id": "e4", "source": "k-cp",  "target": "k-w2",  "animated": True,  "style": {"stroke": "#63b3ed", "strokeWidth": 1}},
+        {"id": "e5", "source": "k-cp",  "target": "k-w3",  "animated": True,  "style": {"stroke": "#63b3ed", "strokeWidth": 1}},
+        {"id": "e6", "source": "k-w1",  "target": "k-lb",  "animated": False, "style": {"stroke": "#fc8181", "strokeWidth": 1}},
+        {"id": "e7", "source": "k-w3",  "target": "k-nfs", "animated": False, "style": {"stroke": "#b794f4", "strokeWidth": 1}},
+    ],
+}
+
 TEMPLATES = {
     "mxhome": {
         "name": "MXHOME — Topología completa",
         "description": "WANs (Digi + KEIO) → OPNsense → Core Switch → VLANs (LAB, WiFi, HomeLab, MAAS) con todos los nodos",
         "diagram": MXHOME_TOPOLOGY,
-    }
+    },
+    "small-office": {
+        "name": "Small Office / Branch",
+        "description": "ISP → Firewall → Switch → WiFi AP + 3 servidores + NAS. Template genérico para oficinas pequeñas.",
+        "diagram": SMALL_OFFICE_TOPOLOGY,
+    },
+    "k8s-cluster": {
+        "name": "Kubernetes Cluster Multi-Node",
+        "description": "Gateway → Switch → Control Plane → 3 Workers + Ingress LB + NFS Storage. Template para clústeres k8s/k3s.",
+        "diagram": K8S_CLUSTER_TOPOLOGY,
+    },
 }
