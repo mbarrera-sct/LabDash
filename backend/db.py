@@ -167,3 +167,18 @@ async def purge_expired_sessions():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM sessions WHERE expires_at < ?", (int(time.time()),))
         await db.commit()
+
+async def list_users() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, username, totp_enabled FROM users ORDER BY id"
+        ) as cur:
+            rows = await cur.fetchall()
+            return [dict(r) for r in rows]
+
+async def delete_user(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+        await db.execute("DELETE FROM users WHERE id=?", (user_id,))
+        await db.commit()

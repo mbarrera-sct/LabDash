@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-import db, proxmox, opnsense, k8s, unraid, plex, immich, homeassistant, templates, auth
+import db, proxmox, opnsense, k8s, unraid, plex, immich, homeassistant, templates, auth, snmp, ping as pingmod
 
 FRONTEND = Path(__file__).parent.parent / "frontend" / "dist"
 
@@ -77,6 +77,16 @@ class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str
 
+class TotpEnableRequest(BaseModel):
+    code: str
+
+class CreateUserRequest(BaseModel):
+    username: str
+    password: str
+
+class PingRequest(BaseModel):
+    ips: list[str]
+
 # ── Auth routes ───────────────────────────────────────────────────────────────
 @app.post("/api/auth/login")
 async def login(body: LoginRequest, request: Request):
@@ -88,13 +98,15 @@ async def login(body: LoginRequest, request: Request):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     auth.clear_rate_limit(ip)
-    temp_token = await auth.create_session(user["id"], is_temp=True)
 
-    return {
-        "temp_token": temp_token,
-        "needs_totp": bool(user["totp_enabled"]),
-        "needs_totp_setup": not bool(user["totp_enabled"]),
-    }
+    if bool(user["totp_enabled"]):
+        # TOTP enabled — need verification step
+        temp_token = await auth.create_session(user["id"], is_temp=True)
+        return {"temp_token": temp_token, "needs_totp": True}
+    else:
+        # No TOTP — direct session
+        token = await auth.create_session(user["id"], is_temp=False)
+        return {"token": token, "username": user["username"], "needs_totp": False}
 
 @app.post("/api/auth/verify-totp")
 async def verify_totp(body: TotpVerifyRequest):
@@ -142,11 +154,8 @@ async def confirm_totp_setup(body: TotpSetupConfirmRequest):
     return {"token": token, "username": user["username"]}
 
 @app.get("/api/auth/me")
-async def me(request: Request):
-    user = getattr(request.state, "user", None)
-    if not user:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    return {"username": user["username"], "totp_enabled": bool(user["totp_enabled"])}
+async def me(user: dict = Depends(auth.get_current_user)):
+    return {"id": user["id"], "username": user["username"], "totp_enabled": bool(user["totp_enabled"])}
 
 @app.post("/api/auth/logout")
 async def logout(request: Request):
@@ -157,22 +166,38 @@ async def logout(request: Request):
     return {"ok": True}
 
 @app.post("/api/auth/change-password")
-async def change_password(body: ChangePasswordRequest, request: Request):
-    user = getattr(request.state, "user", None)
-    if not user:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+async def change_password(body: ChangePasswordRequest, user: dict = Depends(auth.get_current_user)):
     if not auth.verify_password(body.current_password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="Current password incorrect")
-    new_hash = auth.hash_password(body.new_password)
-    await db.update_user_password(user["id"], new_hash)
+        raise HTTPException(status_code=401, detail="Contraseña actual incorrecta")
+    await db.update_user_password(user["id"], auth.hash_password(body.new_password))
     return {"ok": True}
 
 @app.post("/api/auth/disable-totp")
-async def disable_totp_route(request: Request):
-    user = getattr(request.state, "user", None)
-    if not user:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+async def disable_totp_route(user: dict = Depends(auth.get_current_user)):
     await db.disable_totp(user["id"])
+    return {"ok": True}
+
+@app.get("/api/auth/totp-init")
+async def totp_init(user: dict = Depends(auth.get_current_user)):
+    """Start TOTP setup from an authenticated session (profile/settings page)."""
+    if bool(user["totp_enabled"]):
+        raise HTTPException(status_code=400, detail="2FA ya está activado")
+    secret = user["totp_secret"] or auth.generate_totp_secret()
+    await db.set_totp_secret(user["id"], secret)
+    uri = auth.get_totp_uri(secret, user["username"])
+    return {"secret": secret, "uri": uri}
+
+@app.post("/api/auth/totp-enable")
+async def totp_enable(body: TotpEnableRequest, user: dict = Depends(auth.get_current_user)):
+    """Confirm and enable TOTP from the settings page."""
+    if bool(user["totp_enabled"]):
+        raise HTTPException(status_code=400, detail="2FA ya está activado")
+    secret = user["totp_secret"]
+    if not secret:
+        raise HTTPException(status_code=400, detail="Inicia primero el setup de 2FA")
+    if not auth.verify_totp(secret, body.code):
+        raise HTTPException(status_code=401, detail="Código incorrecto — revisa tu app")
+    await db.enable_totp(user["id"], secret)
     return {"ok": True}
 
 @app.get("/api/auth/totp-qr")
@@ -203,6 +228,35 @@ async def totp_qr(request: Request):
     return StreamingResponse(buf, media_type="image/png",
                              headers={"Cache-Control": "no-store"})
 
+
+# ──────────────────────────────────────────────────────────────
+# User management
+# ──────────────────────────────────────────────────────────────
+@app.get("/api/users")
+async def list_users(user: dict = Depends(auth.get_current_user)):
+    users = await db.list_users()
+    return {"users": [
+        {"id": u["id"], "username": u["username"], "totp_enabled": bool(u["totp_enabled"])}
+        for u in users
+    ]}
+
+@app.post("/api/users")
+async def create_user_route(body: CreateUserRequest, user: dict = Depends(auth.get_current_user)):
+    username = body.username.strip()
+    if not username or not body.password:
+        raise HTTPException(status_code=400, detail="Usuario y contraseña son obligatorios")
+    existing = await db.get_user_by_username(username)
+    if existing:
+        raise HTTPException(status_code=409, detail="El nombre de usuario ya existe")
+    await db.create_user(username, auth.hash_password(body.password))
+    return {"ok": True}
+
+@app.delete("/api/users/{user_id}")
+async def delete_user_route(user_id: int, current_user: dict = Depends(auth.get_current_user)):
+    if current_user["id"] == user_id:
+        raise HTTPException(status_code=400, detail="No puedes eliminar tu propia cuenta")
+    await db.delete_user(user_id)
+    return {"ok": True}
 
 # ──────────────────────────────────────────────────────────────
 # Healthz
@@ -276,6 +330,16 @@ async def opn_interfaces():
 async def opn_gateways():
     data, err = await opnsense.fetch()
     return {"data": data.get("gateways", {}) if data else {}, "error": err}
+
+@app.get("/api/opnsense/sysinfo")
+async def opn_sysinfo():
+    data, err = await opnsense.fetch()
+    return {"data": data.get("sysinfo", {}) if data else {}, "error": err}
+
+@app.post("/api/ping")
+async def ping_hosts(body: PingRequest):
+    results = await pingmod.ping_batch(body.ips)
+    return {"results": results}
 
 # ──────────────────────────────────────────────────────────────
 # Kubernetes
@@ -437,6 +501,7 @@ ALL_KEYS = [
     "plex_url", "plex_token",
     "immich_url", "immich_key",
     "ha_url", "ha_token", "ha_entities",
+    "snmp_host", "snmp_community", "snmp_port",
 ]
 SECRET_KEYS = {"pve_pass", "opn_key", "opn_secret", "k8s_token", "unraid_key", "plex_token", "immich_key", "ha_token"}
 
@@ -458,7 +523,16 @@ async def save_settings(payload: dict):
     plex._cache = {"data": None, "ts": 0}
     immich._cache = {"data": None, "ts": 0}
     homeassistant._cache = {"data": None, "ts": 0}
+    snmp._cache = {"data": None, "ts": 0}
     return {"ok": True}
+
+# ──────────────────────────────────────────────────────────────
+# SNMP
+# ──────────────────────────────────────────────────────────────
+@app.get("/api/snmp/interfaces")
+async def snmp_interfaces():
+    data, err = await snmp.fetch()
+    return {"ports": data.get("ports", []) if data else [], "error": err}
 
 # ──────────────────────────────────────────────────────────────
 # Serve React SPA (must come last)

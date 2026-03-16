@@ -21,11 +21,18 @@ async def fetch() -> tuple[dict, str | None]:
             return _cache.get("data") or {}, "Proxmox password not configured"
 
         async with httpx.AsyncClient(base_url=url, verify=False, timeout=10) as c:
-            r = await c.post("/api2/json/access/ticket",
-                             data={"username": user, "password": pwd})
-            r.raise_for_status()
-            ticket = r.json()["data"]["ticket"]
-            headers = {"Cookie": f"PVEAuthCookie={ticket}"}
+            if "!" in user:
+                # API Token auth: username format is "user@realm!tokenid"
+                headers = {"Authorization": f"PVEAPIToken={user}={pwd}"}
+            else:
+                # Password auth: obtain ticket
+                r = await c.post("/api2/json/access/ticket",
+                                 data={"username": user, "password": pwd})
+                r.raise_for_status()
+                ticket = r.json()["data"]["ticket"]
+                csrf   = r.json()["data"]["CSRFPreventionToken"]
+                headers = {"Cookie": f"PVEAuthCookie={ticket}",
+                           "CSRFPreventionToken": csrf}
 
             resources = (await c.get("/api2/json/cluster/resources", headers=headers)).json()["data"]
             nodes     = (await c.get("/api2/json/nodes", headers=headers)).json()["data"]

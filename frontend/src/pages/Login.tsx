@@ -1,12 +1,11 @@
 import { useState } from 'react'
+import { authApi } from '../api'
 
 interface Props {
     onLoginSuccess: (token: string) => void
 }
 
-type Step = 'login' | 'totp-setup' | 'totp-verify'
-
-interface SetupData { secret: string; uri: string; username: string }
+type Step = 'login' | 'totp-verify'
 
 export default function Login({ onLoginSuccess }: Props) {
     const [step, setStep] = useState<Step>('login')
@@ -14,7 +13,6 @@ export default function Login({ onLoginSuccess }: Props) {
     const [password, setPassword] = useState('')
     const [totpCode, setTotpCode] = useState('')
     const [tempToken, setTempToken] = useState('')
-    const [setup, setSetup] = useState<SetupData | null>(null)
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState('')
 
@@ -23,65 +21,27 @@ export default function Login({ onLoginSuccess }: Props) {
         e.preventDefault()
         setLoading(true); setError('')
         try {
-            const r = await fetch('/api/auth/login', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password }),
-            })
-            const d = await r.json()
-            if (!r.ok) throw new Error(d.detail ?? 'Error')
-            setTempToken(d.temp_token)
-
-            if (d.needs_totp_setup) {
-                const sr = await fetch('/api/auth/totp-setup', {
-                    headers: { 'X-Temp-Token': d.temp_token },
-                })
-                const sd = await sr.json()
-                if (!sr.ok) throw new Error(sd.detail ?? 'Error')
-                setSetup(sd)
-                setStep('totp-setup')
-            } else {
+            const d = await authApi.login(username, password)
+            if (d.needs_totp && d.temp_token) {
+                setTempToken(d.temp_token)
                 setStep('totp-verify')
+            } else if (d.token) {
+                onLoginSuccess(d.token)
             }
         } catch (err: any) { setError(err.message) }
         finally { setLoading(false) }
     }
 
-    // ── Step 2a: First-time setup confirm ─────────────────────
-    const handleSetupConfirm = async (e: React.FormEvent) => {
-        e.preventDefault()
-        setLoading(true); setError('')
-        try {
-            const r = await fetch('/api/auth/totp-setup', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ temp_token: tempToken, code: totpCode }),
-            })
-            const d = await r.json()
-            if (!r.ok) throw new Error(d.detail ?? 'Código incorrecto')
-            onLoginSuccess(d.token)
-        } catch (err: any) { setError(err.message) }
-        finally { setLoading(false) }
-    }
-
-    // ── Step 2b: Verify TOTP ───────────────────────────────────
+    // ── Step 2: Verify TOTP ───────────────────────────────────
     const handleTotpVerify = async (e: React.FormEvent) => {
         e.preventDefault()
         setLoading(true); setError('')
         try {
-            const r = await fetch('/api/auth/verify-totp', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ temp_token: tempToken, code: totpCode }),
-            })
-            const d = await r.json()
-            if (!r.ok) throw new Error(d.detail ?? 'Código incorrecto')
+            const d = await authApi.verifyTotp(tempToken, totpCode)
             onLoginSuccess(d.token)
         } catch (err: any) { setError(err.message) }
         finally { setLoading(false) }
     }
-
-    const qrUrl = setup ? `/api/auth/totp-qr?uri=${encodeURIComponent(setup.uri)}` : ''
 
     return (
         <div style={{
@@ -107,9 +67,7 @@ export default function Login({ onLoginSuccess }: Props) {
                     </div>
                     <h1 style={{ fontSize: 22, fontWeight: 700, margin: '0 0 4px' }}>MXHOME</h1>
                     <p style={{ color: 'var(--muted)', fontSize: 13, margin: 0 }}>
-                        {step === 'login' && 'Accede a tu infraestructura'}
-                        {step === 'totp-setup' && 'Configura la autenticación 2FA'}
-                        {step === 'totp-verify' && 'Verificación en dos pasos'}
+                        {step === 'login' ? 'Accede a tu infraestructura' : 'Verificación en dos pasos'}
                     </p>
                 </div>
 
@@ -152,69 +110,7 @@ export default function Login({ onLoginSuccess }: Props) {
                     </form>
                 )}
 
-                {/* ── TOTP Setup (QR) ── */}
-                {step === 'totp-setup' && setup && (
-                    <form onSubmit={handleSetupConfirm}>
-                        <div style={{
-                            background: 'rgba(99,179,237,0.08)', border: '1px solid rgba(99,179,237,0.2)',
-                            borderRadius: 12, padding: '12px 14px', marginBottom: 18,
-                            fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.6,
-                        }}>
-                            <i className="fa-solid fa-shield-halved" style={{ color: 'var(--accent)', marginRight: 7 }} />
-                            Primera vez — escanea el QR con <strong style={{ color: 'var(--text)' }}>Google Authenticator</strong>,{' '}
-                            <strong style={{ color: 'var(--text)' }}>Authy</strong> o cualquier app TOTP.
-                        </div>
-
-                        {/* QR code */}
-                        <div style={{ textAlign: 'center', marginBottom: 18 }}>
-                            <div style={{
-                                display: 'inline-block', padding: 10, background: '#fff',
-                                borderRadius: 12, boxShadow: '0 4px 24px rgba(0,0,0,0.5)',
-                            }}>
-                                <img src={qrUrl} alt="QR 2FA" style={{ width: 200, height: 200, display: 'block' }} />
-                            </div>
-                        </div>
-
-                        {/* Manual key */}
-                        <details style={{ marginBottom: 18 }}>
-                            <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--muted)', userSelect: 'none' }}>
-                                <i className="fa-solid fa-key" style={{ marginRight: 6 }} />Clave manual
-                            </summary>
-                            <div style={{
-                                marginTop: 8, background: 'var(--bg)', border: '1px solid var(--border)',
-                                borderRadius: 8, padding: '8px 12px',
-                                fontFamily: 'JetBrains Mono, monospace', fontSize: 13,
-                                letterSpacing: '0.1em', wordBreak: 'break-all', color: 'var(--accent)',
-                                userSelect: 'all', cursor: 'text',
-                            }}>
-                                {setup.secret}
-                            </div>
-                            <p style={{ fontSize: 11, color: 'var(--muted)', marginTop: 5 }}>
-                                Issuer: LabDash · Account: {setup.username}
-                            </p>
-                        </details>
-
-                        <div className="form-group" style={{ marginBottom: 20 }}>
-                            <label>
-                                <i className="fa-solid fa-mobile-screen-button" style={{ marginRight: 7, color: 'var(--accent5)' }} />
-                                Código de verificación
-                            </label>
-                            <input value={totpCode}
-                                onChange={e => setTotpCode(e.target.value.replace(/\D/g, ''))}
-                                placeholder="123456" maxLength={6} autoFocus
-                                style={{ letterSpacing: '0.4em', fontSize: 24, textAlign: 'center', fontFamily: 'JetBrains Mono, monospace' }}
-                            />
-                        </div>
-                        <button className="btn btn-primary" type="submit" disabled={loading || totpCode.length < 6}
-                            style={{ width: '100%', justifyContent: 'center', padding: '12px 0', fontSize: 15 }}>
-                            {loading
-                                ? <><i className="fa-solid fa-spinner fa-spin" /> Verificando…</>
-                                : <><i className="fa-solid fa-check-double" /> Confirmar y entrar</>}
-                        </button>
-                    </form>
-                )}
-
-                {/* ── TOTP Verify (returning) ── */}
+                {/* ── TOTP Verify ── */}
                 {step === 'totp-verify' && (
                     <form onSubmit={handleTotpVerify}>
                         <div style={{
@@ -247,7 +143,7 @@ export default function Login({ onLoginSuccess }: Props) {
                 )}
 
                 <p style={{ textAlign: 'center', marginTop: 28, fontSize: 11, color: 'var(--muted)' }}>
-                    MXHOME · LabDash v1.1
+                    MXHOME · LabDash v1.2
                 </p>
             </div>
         </div>

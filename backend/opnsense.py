@@ -21,8 +21,12 @@ async def fetch() -> tuple[dict, str | None]:
         async with httpx.AsyncClient(base_url=url, verify=False, timeout=10, auth=auth) as c:
             ifaces   = (await c.get("/api/diagnostics/interface/getInterfaceStatistics")).json()
             gateways = (await c.get("/api/routes/gateway/status")).json()
+            try:
+                sysinfo = (await c.get("/api/core/system/status")).json()
+            except Exception:
+                sysinfo = {}
 
-        data = {"interfaces": ifaces, "gateways": gateways}
+        data = {"interfaces": ifaces, "gateways": gateways, "sysinfo": sysinfo}
         _cache = {"data": data, "ts": time.time()}
         return data, None
     except Exception as e:

@@ -3,7 +3,7 @@ services:
     build: .
     container_name: labdash
     ports:
-      - "8080:8080"
+      - "8090:8080"
     volumes:
       - ./data:/data
     environment:
@@ -32,6 +32,8 @@ services:
       HA_URL: "${HA_URL:-}"
       HA_TOKEN: "${HA_TOKEN:-}"
       HA_ENTITIES: "${HA_ENTITIES:-}"
+    cap_add:
+      - NET_RAW
     restart: unless-stopped
     healthcheck:
       test: [ "CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')\"" ]

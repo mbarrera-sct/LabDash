@@ -4,6 +4,7 @@ import Network from './pages/Network'
 import Services from './pages/Services'
 import Settings from './pages/Settings'
 import Login from './pages/Login'
+import { authApi, type CurrentUser, clearToken, setToken as storeToken } from './api'
 
 type Tab = 'dashboard' | 'network' | 'services' | 'settings'
 type AuthState = 'checking' | 'unauthenticated' | 'authenticated'
@@ -34,6 +35,7 @@ function setAuthHeaders(token: string | null) {
 export default function App() {
     const [authState, setAuthState] = useState<AuthState>('checking')
     const [token, setToken] = useState<string | null>(null)
+    const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null)
     const [tab, setTab] = useState<Tab>('dashboard')
     const [toasts, setToasts] = useState<Toast[]>([])
 
@@ -43,32 +45,46 @@ export default function App() {
         setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 4000)
     }
 
+    const refreshUser = async () => {
+        try {
+            const u = await authApi.me()
+            setCurrentUser(u)
+        } catch { }
+    }
+
     // Check existing session on mount
     useEffect(() => {
         const saved = localStorage.getItem(TOKEN_KEY)
         if (!saved) { setAuthState('unauthenticated'); return }
         setAuthHeaders(saved)
-        fetch('/api/auth/me')
-            .then(r => {
-                if (r.ok) { setToken(saved); setAuthState('authenticated') }
-                else { localStorage.removeItem(TOKEN_KEY); setAuthState('unauthenticated') }
+        authApi.me()
+            .then(u => {
+                setToken(saved)
+                setCurrentUser(u)
+                setAuthState('authenticated')
             })
-            .catch(() => { localStorage.removeItem(TOKEN_KEY); setAuthState('unauthenticated') })
+            .catch(() => {
+                clearToken()
+                setAuthState('unauthenticated')
+            })
     }, [])
 
     const handleLoginSuccess = (newToken: string) => {
-        localStorage.setItem(TOKEN_KEY, newToken)
+        storeToken(newToken)
         setToken(newToken)
         setAuthHeaders(newToken)
         setAuthState('authenticated')
+        // Fetch user info after login
+        authApi.me().then(u => setCurrentUser(u)).catch(() => { })
     }
 
     const handleLogout = async () => {
         if (token) {
             await fetch('/api/auth/logout', { method: 'POST' }).catch(() => { })
         }
-        localStorage.removeItem(TOKEN_KEY)
+        clearToken()
         setToken(null)
+        setCurrentUser(null)
         setAuthHeaders(null)
         setAuthState('unauthenticated')
     }
@@ -137,14 +153,19 @@ export default function App() {
                 </nav>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                    <span style={{
-                        fontSize: 12, color: 'var(--muted)',
-                        background: 'rgba(104,211,145,0.1)', border: '1px solid rgba(104,211,145,0.3)',
-                        borderRadius: 20, padding: '3px 12px', display: 'flex', alignItems: 'center', gap: 6,
-                    }}>
-                        <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#68d391', display: 'inline-block' }} />
-                        MXHOME · 2026
-                    </span>
+                    {currentUser && (
+                        <span style={{
+                            fontSize: 12, color: 'var(--muted)',
+                            background: 'rgba(104,211,145,0.1)', border: '1px solid rgba(104,211,145,0.3)',
+                            borderRadius: 20, padding: '3px 12px', display: 'flex', alignItems: 'center', gap: 6,
+                        }}>
+                            <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#68d391', display: 'inline-block' }} />
+                            {currentUser.username}
+                            {currentUser.totp_enabled && (
+                                <i className="fa-solid fa-shield-halved" style={{ fontSize: 10, color: 'var(--accent5)', marginLeft: 2 }} title="2FA activo" />
+                            )}
+                        </span>
+                    )}
                     <button
                         onClick={handleLogout}
                         title="Cerrar sesión"
@@ -166,7 +187,13 @@ export default function App() {
                 {tab === 'dashboard' && <Dashboard onToast={onToast} />}
                 {tab === 'network' && <Network onToast={onToast} />}
                 {tab === 'services' && <Services onToast={onToast} />}
-                {tab === 'settings' && <Settings onToast={onToast} />}
+                {tab === 'settings' && (
+                    <Settings
+                        onToast={onToast}
+                        currentUser={currentUser}
+                        onUserUpdate={refreshUser}
+                    />
+                )}
             </main>
         </>
     )

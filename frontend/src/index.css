@@ -1078,3 +1078,61 @@ body::before {
     padding: 16px;
   }
 }
+/* ── Slide-in animation (toasts) ── */
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(20px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* ── Stat card with left border ── */
+.stat-card {
+  border-left-width: 3px;
+  border-left-style: solid;
+}
+
+/* ── Diagram toolbar (override for Panel usage) ── */
+.diagram-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  background: rgba(10, 14, 26, 0.92);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  backdrop-filter: blur(12px);
+  position: static;
+  top: unset;
+  left: unset;
+  z-index: unset;
+}
+
+/* ── Diagram node panel (override for Panel usage) ── */
+.diagram-node-panel {
+  background: rgba(10, 14, 26, 0.95);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 18px;
+  min-width: 240px;
+  backdrop-filter: blur(16px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  position: static;
+  top: unset;
+  right: unset;
+  z-index: unset;
+}
+
+.diagram-node-panel h4 {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 14px;
+  color: var(--text);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+/* ── btn:disabled ── */
+.btn:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
