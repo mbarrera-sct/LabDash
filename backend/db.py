@@ -61,17 +61,44 @@ CREATE TABLE IF NOT EXISTS alert_rules (
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(_CREATE)
+        await db.executescript(
+            "PRAGMA journal_mode=WAL;"
+            "PRAGMA synchronous=NORMAL;"
+            "PRAGMA cache_size=10000;"
+            "PRAGMA temp_store=MEMORY;"
+            "PRAGMA mmap_size=134217728;"  # 128 MB
+        )
         await db.commit()
 
 # ── Config ────────────────────────────────────────────────────────────────────
+# In-memory settings cache to avoid a DB round-trip on every API call
+_settings_cache: dict = {}       # key -> value
+_settings_cache_ts: float = 0.0
+_SETTINGS_CACHE_TTL = 30         # seconds
+
+
+def _invalidate_settings_cache() -> None:
+    global _settings_cache, _settings_cache_ts
+    _settings_cache = {}
+    _settings_cache_ts = 0.0
+
 
 async def get_setting(key: str, default: str = "") -> str:
+    global _settings_cache, _settings_cache_ts
+    now = time.time()
+    if now - _settings_cache_ts < _SETTINGS_CACHE_TTL and key in _settings_cache:
+        return _settings_cache[key]
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT value FROM config WHERE key=?", (key,)) as cur:
             row = await cur.fetchone()
-            return row[0] if row else default
+            val = row[0] if row else default
+    _settings_cache[key] = val
+    if _settings_cache_ts == 0.0:
+        _settings_cache_ts = now
+    return val
 
 async def set_setting(key: str, value: str):
+    _invalidate_settings_cache()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO config (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -80,6 +107,7 @@ async def set_setting(key: str, value: str):
         await db.commit()
 
 async def set_settings(data: dict):
+    _invalidate_settings_cache()
     async with aiosqlite.connect(DB_PATH) as db:
         for k, v in data.items():
             await db.execute(
@@ -89,12 +117,19 @@ async def set_settings(data: dict):
         await db.commit()
 
 async def get_settings(keys: list[str]) -> dict:
+    global _settings_cache, _settings_cache_ts
+    now = time.time()
+    # Return from cache if fresh and all keys present
+    if now - _settings_cache_ts < _SETTINGS_CACHE_TTL and all(k in _settings_cache for k in keys):
+        return {k: _settings_cache[k] for k in keys}
     result = {}
     async with aiosqlite.connect(DB_PATH) as db:
         for k in keys:
             async with db.execute("SELECT value FROM config WHERE key=?", (k,)) as cur:
                 row = await cur.fetchone()
                 result[k] = row[0] if row else ""
+    _settings_cache.update(result)
+    _settings_cache_ts = now
     return result
 
 # ── Diagram ───────────────────────────────────────────────────────────────────

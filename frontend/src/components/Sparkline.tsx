@@ -1,3 +1,5 @@
+import { memo } from 'react'
+
 interface Props {
     data: number[]
     width?: number
@@ -7,7 +9,7 @@ interface Props {
     strokeWidth?: number
 }
 
-export function Sparkline({ data, width = 80, height = 28, color = '#68d391', fill = true, strokeWidth = 1.5 }: Props) {
+function SparklineInner({ data, width = 80, height = 28, color = '#68d391', fill = true, strokeWidth = 1.5 }: Props) {
     if (!data || data.length < 2) return null
 
     const min = Math.min(...data)
@@ -37,3 +39,5 @@ export function Sparkline({ data, width = 80, height = 28, color = '#68d391', fi
         </svg>
     )
 }
+
+export const Sparkline = memo(SparklineInner)

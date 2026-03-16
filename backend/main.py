@@ -168,7 +168,7 @@ async def logout(request: Request):
     auth_header = request.headers.get("Authorization", "")
     token = auth_header[7:] if auth_header.startswith("Bearer ") else request.cookies.get("labdash_session", "")
     if token:
-        await db.delete_session(token)
+        await auth.delete_session_cached(token)
     return {"ok": True}
 
 @app.post("/api/auth/change-password")

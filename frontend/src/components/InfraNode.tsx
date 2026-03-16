@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { Handle, Position } from '@xyflow/react'
 import { fmtKbps } from '../utils/fmt'
 
@@ -13,7 +14,7 @@ interface Data {
 }
 
 
-export default function InfraNode({ data, selected }: { data: Data; selected?: boolean }) {
+function InfraNodeInner({ data, selected }: { data: Data; selected?: boolean }) {
     const statusColor =
         data.status === 'online'  ? '#68d391' :
         data.status === 'offline' ? '#fc8181' : '#718096'
@@ -94,3 +95,6 @@ export default function InfraNode({ data, selected }: { data: Data; selected?: b
         </div>
     )
 }
+
+const InfraNode = memo(InfraNodeInner)
+export default InfraNode

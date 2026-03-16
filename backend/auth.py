@@ -47,6 +47,27 @@ def verify_totp(secret: str, code: str) -> bool:
     totp = pyotp.TOTP(secret)
     return totp.verify(code.strip(), valid_window=1)
 
+# ── Session cache (avoids 2 DB hits per request) ─────────────────────────────
+_SESSION_CACHE: dict[str, tuple[dict, int]] = {}  # token -> (user, cache_exp)
+SESSION_CACHE_TTL = 30  # seconds
+
+
+def _session_cache_get(token: str) -> dict | None:
+    entry = _SESSION_CACHE.get(token)
+    if entry and time.time() < entry[1]:
+        return entry[0]
+    _SESSION_CACHE.pop(token, None)
+    return None
+
+
+def _session_cache_set(token: str, user: dict) -> None:
+    _SESSION_CACHE[token] = (user, int(time.time()) + SESSION_CACHE_TTL)
+
+
+def _session_cache_invalidate(token: str) -> None:
+    _SESSION_CACHE.pop(token, None)
+
+
 # ── Session management ────────────────────────────────────────────────────────
 
 async def create_session(user_id: int, is_temp: bool = False) -> str:
@@ -58,19 +79,34 @@ async def create_session(user_id: int, is_temp: bool = False) -> str:
 
 async def verify_session(token: str, require_temp: bool = False) -> dict | None:
     """Returns user dict or None. Cleans up expired sessions lazily."""
+    # Only cache normal (non-temp) sessions to keep security semantics simple
+    if not require_temp:
+        cached = _session_cache_get(token)
+        if cached is not None:
+            return cached
+
     row = await db.get_session(token)
     if not row:
         return None
     token_db, user_id, expires_at, is_temp = row
     if int(time.time()) > expires_at:
         await db.delete_session(token)
+        _session_cache_invalidate(token)
         return None
     if require_temp and not is_temp:
         return None
     if not require_temp and is_temp:
         return None
     user = await db.get_user_by_id(user_id)
+    if user and not require_temp:
+        _session_cache_set(token, user)
     return user
+
+
+async def delete_session_cached(token: str) -> None:
+    """Delete session and invalidate the in-memory cache."""
+    _session_cache_invalidate(token)
+    await db.delete_session(token)
 
 # ── FastAPI dependency ────────────────────────────────────────────────────────
 
