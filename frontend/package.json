@@ -13,7 +13,8 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "@xyflow/react": "^12.3.6",
-    "lucide-react": "^0.474.0"
+    "lucide-react": "^0.474.0",
+    "html-to-image": "^1.11.11"
   },
   "devDependencies": {
     "@types/react": "^18.3.20",

@@ -11,7 +11,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-import db, proxmox, opnsense, k8s, unraid, plex, immich, homeassistant, templates, auth, snmp, ping as pingmod
+import db, proxmox, opnsense, k8s, unraid, plex, immich, homeassistant, templates, auth, snmp
+import ping as pingmod
+import collector, alerting
 
 FRONTEND = Path(__file__).parent.parent / "frontend" / "dist"
 
@@ -23,6 +25,8 @@ async def lifespan(app: FastAPI):
     await db.init_db()
     await db.purge_expired_sessions()
     await auth.create_admin_if_needed()
+    asyncio.create_task(collector.run())
+    asyncio.create_task(alerting.run())
     yield
 
 app = FastAPI(title="LabDash", lifespan=lifespan)
@@ -39,13 +43,10 @@ app.add_middleware(
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
-    # Allow public paths
     if any(path.startswith(p) for p in PUBLIC_PREFIXES):
         return await call_next(request)
-    # Allow SPA root + non-api paths
     if not path.startswith("/api/"):
         return await call_next(request)
-    # Require auth for all /api/* except /api/auth/*
     token = None
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
@@ -87,24 +88,33 @@ class CreateUserRequest(BaseModel):
 class PingRequest(BaseModel):
     ips: list[str]
 
+class VmActionRequest(BaseModel):
+    node: str
+    vmtype: str
+    vmid: int
+    action: str
+
+class AlertRuleRequest(BaseModel):
+    name: str
+    metric_key: str
+    operator: str
+    threshold: float
+    notify_url: str = ""
+    cooldown_s: int = 3600
+
 # ── Auth routes ───────────────────────────────────────────────────────────────
 @app.post("/api/auth/login")
 async def login(body: LoginRequest, request: Request):
     ip = request.client.host if request.client else "unknown"
     auth.check_rate_limit(ip)
-
     user = await db.get_user_by_username(body.username)
     if not user or not auth.verify_password(body.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-
     auth.clear_rate_limit(ip)
-
     if bool(user["totp_enabled"]):
-        # TOTP enabled — need verification step
         temp_token = await auth.create_session(user["id"], is_temp=True)
         return {"temp_token": temp_token, "needs_totp": True}
     else:
-        # No TOTP — direct session
         token = await auth.create_session(user["id"], is_temp=False)
         return {"token": token, "username": user["username"], "needs_totp": False}
 
@@ -117,22 +127,18 @@ async def verify_totp(body: TotpVerifyRequest):
         raise HTTPException(status_code=400, detail="TOTP not configured")
     if not auth.verify_totp(user["totp_secret"], body.code):
         raise HTTPException(status_code=401, detail="Invalid TOTP code")
-    # Delete temp session, create real session
     await db.delete_session(body.temp_token)
     token = await auth.create_session(user["id"], is_temp=False)
     return {"token": token, "username": user["username"]}
 
 @app.get("/api/auth/totp-setup")
 async def get_totp_setup(request: Request):
-    """Returns TOTP secret + URI for QR code. Stores pending secret."""
     temp_token = request.headers.get("X-Temp-Token")
     if not temp_token:
         raise HTTPException(status_code=401, detail="Missing temp token")
     user = await auth.verify_session(temp_token, require_temp=True)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired temp token")
-
-    # Generate (or reuse pending) secret
     secret = user["totp_secret"] or auth.generate_totp_secret()
     await db.set_totp_secret(user["id"], secret)
     uri = auth.get_totp_uri(secret, user["username"])
@@ -179,7 +185,6 @@ async def disable_totp_route(user: dict = Depends(auth.get_current_user)):
 
 @app.get("/api/auth/totp-init")
 async def totp_init(user: dict = Depends(auth.get_current_user)):
-    """Start TOTP setup from an authenticated session (profile/settings page)."""
     if bool(user["totp_enabled"]):
         raise HTTPException(status_code=400, detail="2FA ya está activado")
     secret = user["totp_secret"] or auth.generate_totp_secret()
@@ -189,7 +194,6 @@ async def totp_init(user: dict = Depends(auth.get_current_user)):
 
 @app.post("/api/auth/totp-enable")
 async def totp_enable(body: TotpEnableRequest, user: dict = Depends(auth.get_current_user)):
-    """Confirm and enable TOTP from the settings page."""
     if bool(user["totp_enabled"]):
         raise HTTPException(status_code=400, detail="2FA ya está activado")
     secret = user["totp_secret"]
@@ -202,36 +206,23 @@ async def totp_enable(body: TotpEnableRequest, user: dict = Depends(auth.get_cur
 
 @app.get("/api/auth/totp-qr")
 async def totp_qr(request: Request):
-    """Return a QR code PNG for the TOTP provisioning URI.
-    Requires X-Temp-Token header (same as totp-setup).
-    Frontend can use as: <img src="/api/auth/totp-qr" headers={X-Temp-Token: ...}>
-    — but since img tags can't set headers we use a signed approach:
-    the client first calls GET /api/auth/totp-setup to get the URI,
-    then encodes the URI as a query param here.
-    """
     import io, qrcode
     from fastapi.responses import StreamingResponse
-
     uri = request.query_params.get("uri", "")
     if not uri or not uri.startswith("otpauth://"):
         raise HTTPException(status_code=400, detail="Missing or invalid uri param")
-
     qr = qrcode.QRCode(box_size=8, border=2,
                        error_correction=qrcode.constants.ERROR_CORRECT_M)
     qr.add_data(uri)
     qr.make(fit=True)
     img = qr.make_image(fill_color="#0a0a0a", back_color="#ffffff")
-
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     buf.seek(0)
     return StreamingResponse(buf, media_type="image/png",
                              headers={"Cache-Control": "no-store"})
 
-
-# ──────────────────────────────────────────────────────────────
-# User management
-# ──────────────────────────────────────────────────────────────
+# ── User management ───────────────────────────────────────────────────────────
 @app.get("/api/users")
 async def list_users(user: dict = Depends(auth.get_current_user)):
     users = await db.list_users()
@@ -258,21 +249,17 @@ async def delete_user_route(user_id: int, current_user: dict = Depends(auth.get_
     await db.delete_user(user_id)
     return {"ok": True}
 
-# ──────────────────────────────────────────────────────────────
-# Healthz
-# ──────────────────────────────────────────────────────────────
+# ── Healthz ───────────────────────────────────────────────────────────────────
 @app.get("/healthz")
 async def healthz():
     return "ok"
 
-# ──────────────────────────────────────────────────────────────
-# Proxmox
-# ──────────────────────────────────────────────────────────────
+# ── Proxmox ───────────────────────────────────────────────────────────────────
 @app.get("/api/proxmox/nodes")
 async def pve_nodes():
     data, err = await proxmox.fetch()
-    nodes_raw = data.get("nodes", []) if data else []
-    resources = data.get("resources", []) if data else []
+    nodes_raw  = data.get("nodes", []) if data else []
+    resources  = data.get("resources", []) if data else []
     by_node = defaultdict(lambda: {"vms": 0, "lxc": 0, "running": 0, "templates": 0})
     for r in resources:
         t = r.get("type")
@@ -286,12 +273,12 @@ async def pve_nodes():
                     by_node[n]["running"] += 1
     nodes = [
         {
-            "name": n.get("node"),
-            "status": n.get("status"),
-            "cpu": round(n.get("cpu", 0) * 100, 1),
+            "name":     n.get("node"),
+            "status":   n.get("status"),
+            "cpu":      round(n.get("cpu", 0) * 100, 1),
             "mem_used": n.get("mem", 0),
-            "mem_max": n.get("maxmem", 1),
-            "uptime": n.get("uptime", 0),
+            "mem_max":  n.get("maxmem", 1),
+            "uptime":   n.get("uptime", 0),
             **by_node.get(n.get("node", ""), {}),
         }
         for n in nodes_raw
@@ -315,12 +302,23 @@ async def pve_vms():
             "maxdisk":  r.get("maxdisk", 0),
             "cpu":      round(r.get("cpu", 0) * 100, 1),
             "uptime":   r.get("uptime", 0),
+            "node":     r.get("node"),
         })
     return {"by_node": dict(by_node), "error": err}
 
-# ──────────────────────────────────────────────────────────────
-# OPNsense
-# ──────────────────────────────────────────────────────────────
+@app.post("/api/proxmox/test")
+async def pve_test():
+    ok, msg = await proxmox.test_connection()
+    return {"ok": ok, "message": msg}
+
+@app.post("/api/proxmox/vm-action")
+async def pve_vm_action(body: VmActionRequest):
+    ok, msg = await proxmox.vm_action(body.node, body.vmtype, body.vmid, body.action)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"ok": True, "upid": msg}
+
+# ── OPNsense ──────────────────────────────────────────────────────────────────
 @app.get("/api/opnsense/interfaces")
 async def opn_interfaces():
     data, err = await opnsense.fetch()
@@ -336,14 +334,80 @@ async def opn_sysinfo():
     data, err = await opnsense.fetch()
     return {"data": data.get("sysinfo", {}) if data else {}, "error": err}
 
+@app.get("/api/opnsense/dhcp")
+async def opn_dhcp():
+    data, err = await opnsense.fetch()
+    raw  = data.get("dhcp", {}) if data else {}
+    rows = raw.get("rows", [])
+    leases = []
+    for r in rows:
+        leases.append({
+            "ip":       r.get("address") or r.get("ip-address") or "",
+            "mac":      r.get("hwaddr")  or r.get("hw-address") or r.get("mac", ""),
+            "hostname": r.get("hostname") or r.get("client-hostname") or "",
+            "state":    r.get("state", 0),
+            "expire":   r.get("expire") or r.get("valid-lft") or "",
+        })
+    return {"leases": leases, "error": err}
+
+@app.get("/api/opnsense/arp")
+async def opn_arp():
+    data, err = await opnsense.fetch()
+    raw = data.get("arp", {}) if data else {}
+    # OPNsense returns {"rows": [...]} or direct array
+    rows = raw.get("rows", []) if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
+    entries = [
+        {
+            "ip":        r.get("ip", ""),
+            "mac":       r.get("mac", ""),
+            "hostname":  r.get("hostname", ""),
+            "interface": r.get("intf", r.get("interface", "")),
+            "permanent": bool(r.get("permanent", False)),
+        }
+        for r in rows if r.get("ip")
+    ]
+    return {"entries": entries, "error": err}
+
+@app.get("/api/opnsense/fwlog")
+async def opn_fwlog():
+    data, err = await opnsense.fetch()
+    raw = data.get("fw_log", {}) if data else {}
+    rows = raw.get("rows", []) if isinstance(raw, dict) else []
+    entries = [
+        {
+            "action":  r.get("action", r.get("__action__", "")),
+            "src":     r.get("src", r.get("__src__", "")),
+            "dst":     r.get("dst", r.get("__dst__", "")),
+            "srcport": r.get("srcport", r.get("__srcport__", "")),
+            "dstport": r.get("dstport", r.get("__dstport__", "")),
+            "proto":   r.get("proto", r.get("__proto__", "")),
+            "iface":   r.get("interface", r.get("__if__", r.get("if", ""))),
+            "label":   r.get("label", r.get("__label__", "")),
+        }
+        for r in rows[:100]
+    ]
+    return {"entries": entries, "error": err}
+
 @app.post("/api/ping")
 async def ping_hosts(body: PingRequest):
     results = await pingmod.ping_batch(body.ips)
     return {"results": results}
 
-# ──────────────────────────────────────────────────────────────
-# Kubernetes
-# ──────────────────────────────────────────────────────────────
+@app.get("/api/network/live")
+async def network_live():
+    """Real-time ping status for all diagram nodes + latest SNMP bandwidth."""
+    diagram = await db.get_diagram()
+    ips = list({
+        n["data"]["ip"]
+        for n in diagram.get("nodes", [])
+        if n.get("data", {}).get("ip")
+    })
+    ping_results = await pingmod.ping_batch(ips) if ips else {}
+    snmp_in  = await db.get_metric_latest("snmp.in_kbps")
+    snmp_out = await db.get_metric_latest("snmp.out_kbps")
+    return {"ping": ping_results, "snmp_in_kbps": snmp_in, "snmp_out_kbps": snmp_out}
+
+# ── Kubernetes ────────────────────────────────────────────────────────────────
 @app.get("/api/k8s/nodes")
 async def k8s_nodes():
     data, err = await k8s.fetch()
@@ -386,9 +450,7 @@ async def k8s_workloads():
             by_ns[ns]["running_pods"] += 1
     return {"namespaces": dict(by_ns), "error": err}
 
-# ──────────────────────────────────────────────────────────────
-# Unraid
-# ──────────────────────────────────────────────────────────────
+# ── Unraid ────────────────────────────────────────────────────────────────────
 @app.get("/api/unraid/system")
 async def unraid_system():
     data, err = await unraid.fetch()
@@ -399,33 +461,25 @@ async def unraid_docker():
     data, err = await unraid.fetch()
     return {"containers": data.get("docker", []) if data else [], "error": err}
 
-# ──────────────────────────────────────────────────────────────
-# Plex
-# ──────────────────────────────────────────────────────────────
+# ── Plex ──────────────────────────────────────────────────────────────────────
 @app.get("/api/plex/info")
 async def plex_info():
     data, err = await plex.fetch()
     return {"data": data or {}, "error": err}
 
-# ──────────────────────────────────────────────────────────────
-# Immich
-# ──────────────────────────────────────────────────────────────
+# ── Immich ────────────────────────────────────────────────────────────────────
 @app.get("/api/immich/stats")
 async def immich_stats():
     data, err = await immich.fetch()
     return {"data": data or {}, "error": err}
 
-# ──────────────────────────────────────────────────────────────
-# Home Assistant
-# ──────────────────────────────────────────────────────────────
+# ── Home Assistant ────────────────────────────────────────────────────────────
 @app.get("/api/ha/states")
 async def ha_states():
     data, err = await homeassistant.fetch()
     return {"states": data.get("states", []) if data else [], "error": err}
 
-# ──────────────────────────────────────────────────────────────
-# Aggregate status
-# ──────────────────────────────────────────────────────────────
+# ── Aggregate status ──────────────────────────────────────────────────────────
 @app.get("/api/status")
 async def status():
     pve_data, pve_err = await proxmox.fetch()
@@ -436,11 +490,11 @@ async def status():
     templates  = [r for r in resources if r.get("type") in ("qemu","lxc") and r.get("template")]
 
     k8s_data, _ = await k8s.fetch()
-    k8s_nodes  = len(k8s_data.get("nodes", {}).get("items", [])) if k8s_data else 0
+    k8s_nodes_count = len(k8s_data.get("nodes", {}).get("items", [])) if k8s_data else 0
 
     opn_data, _ = await opnsense.fetch()
-    gw_items    = opn_data.get("gateways", {}).get("items", []) if opn_data else []
-    wan_up      = sum(1 for g in gw_items if g.get("status_translated") == "Online")
+    gw_items = opn_data.get("gateways", {}).get("items", []) if opn_data else []
+    wan_up   = sum(1 for g in gw_items if g.get("status_translated") == "Online")
 
     return {
         "proxmox": {
@@ -451,19 +505,17 @@ async def status():
             "error":     pve_err,
         },
         "k8s": {
-            "nodes": k8s_nodes,
+            "nodes": k8s_nodes_count,
             "error": None,
         },
         "opnsense": {
-            "wan_up": wan_up,
+            "wan_up":   wan_up,
             "gateways": len(gw_items),
         },
         "ts": int(time.time()),
     }
 
-# ──────────────────────────────────────────────────────────────
-# Diagram CRUD
-# ──────────────────────────────────────────────────────────────
+# ── Diagram CRUD ──────────────────────────────────────────────────────────────
 @app.get("/api/diagram")
 async def get_diagram():
     return await db.get_diagram()
@@ -473,9 +525,7 @@ async def save_diagram(payload: dict):
     await db.save_diagram(payload)
     return {"ok": True}
 
-# ──────────────────────────────────────────────────────────────
-# Diagram templates
-# ──────────────────────────────────────────────────────────────
+# ── Diagram templates ─────────────────────────────────────────────────────────
 @app.get("/api/templates")
 async def list_templates():
     return [
@@ -490,9 +540,7 @@ async def get_template(template_id: str):
         raise HTTPException(status_code=404, detail="Template not found")
     return tpl["diagram"]
 
-# ──────────────────────────────────────────────────────────────
-# Settings
-# ──────────────────────────────────────────────────────────────
+# ── Settings ──────────────────────────────────────────────────────────────────
 ALL_KEYS = [
     "pve_url", "pve_user", "pve_pass",
     "opn_url", "opn_key", "opn_secret",
@@ -502,6 +550,7 @@ ALL_KEYS = [
     "immich_url", "immich_key",
     "ha_url", "ha_token", "ha_entities",
     "snmp_host", "snmp_community", "snmp_port",
+    "session_timeout_hours",
 ]
 SECRET_KEYS = {"pve_pass", "opn_key", "opn_secret", "k8s_token", "unraid_key", "plex_token", "immich_key", "ha_token"}
 
@@ -512,10 +561,8 @@ async def get_settings():
 
 @app.post("/api/settings")
 async def save_settings(payload: dict):
-    # Only save keys we know about; skip masked values
     filtered = {k: v for k, v in payload.items() if k in ALL_KEYS and v != "***"}
     await db.set_settings(filtered)
-    # Invalidate caches
     proxmox._cache = {"data": None, "ts": 0}
     opnsense._cache = {"data": None, "ts": 0}
     k8s._cache = {"data": None, "ts": 0}
@@ -526,17 +573,66 @@ async def save_settings(payload: dict):
     snmp._cache = {"data": None, "ts": 0}
     return {"ok": True}
 
-# ──────────────────────────────────────────────────────────────
-# SNMP
-# ──────────────────────────────────────────────────────────────
+# ── SNMP ──────────────────────────────────────────────────────────────────────
 @app.get("/api/snmp/interfaces")
 async def snmp_interfaces():
     data, err = await snmp.fetch()
     return {"ports": data.get("ports", []) if data else [], "error": err}
 
-# ──────────────────────────────────────────────────────────────
-# Serve React SPA (must come last)
-# ──────────────────────────────────────────────────────────────
+# ── Metrics ───────────────────────────────────────────────────────────────────
+@app.get("/api/metrics/{key:path}")
+async def get_metrics(key: str, hours: int = 24):
+    data = await db.get_metrics(key, hours=hours, limit=300)
+    return {"key": key, "points": data}
+
+@app.get("/api/metrics-keys")
+async def metrics_keys():
+    """Return distinct metric keys available."""
+    import aiosqlite
+    async with aiosqlite.connect(db.DB_PATH) as conn:
+        async with conn.execute(
+            "SELECT DISTINCT key FROM metrics ORDER BY key"
+        ) as cur:
+            rows = await cur.fetchall()
+    return {"keys": [r[0] for r in rows]}
+
+# ── Events ────────────────────────────────────────────────────────────────────
+@app.get("/api/events")
+async def get_events(limit: int = 50):
+    events = await db.get_events(limit=limit)
+    return {"events": events}
+
+# ── Alert rules ───────────────────────────────────────────────────────────────
+@app.get("/api/alert-rules")
+async def list_alert_rules():
+    rules = await db.get_alert_rules()
+    return {"rules": rules}
+
+@app.post("/api/alert-rules")
+async def create_alert_rule(body: AlertRuleRequest):
+    rule_id = await db.create_alert_rule(
+        body.name, body.metric_key, body.operator,
+        body.threshold, body.notify_url, body.cooldown_s
+    )
+    return {"ok": True, "id": rule_id}
+
+@app.delete("/api/alert-rules/{rule_id}")
+async def delete_alert_rule(rule_id: int):
+    await db.delete_alert_rule(rule_id)
+    return {"ok": True}
+
+@app.patch("/api/alert-rules/{rule_id}/toggle")
+async def toggle_alert_rule(rule_id: int, enabled: bool = True):
+    await db.toggle_alert_rule(rule_id, enabled)
+    return {"ok": True}
+
+# ── Uptime ────────────────────────────────────────────────────────────────────
+@app.get("/api/uptime/{host:path}")
+async def get_uptime(host: str, hours: int = 24):
+    pct = await db.get_uptime_pct(host, hours=hours)
+    return {"host": host, "hours": hours, "pct": pct}
+
+# ── Serve React SPA (must come last) ─────────────────────────────────────────
 if FRONTEND.exists():
     app.mount("/assets", StaticFiles(directory=FRONTEND / "assets"), name="assets")
 

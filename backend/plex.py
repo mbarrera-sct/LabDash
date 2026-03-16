@@ -23,18 +23,44 @@ async def fetch() -> tuple[dict, str | None]:
             libs_r = await c.get("/library/sections")
             libs_r.raise_for_status()
 
-        server = info_r.json().get("MediaContainer", {})
-        libs   = libs_r.json().get("MediaContainer", {}).get("Directory", [])
+            server = info_r.json().get("MediaContainer", {})
+            libs   = libs_r.json().get("MediaContainer", {}).get("Directory", [])
+
+            # Fetch real item count per library (sections list doesn't include it reliably)
+            lib_counts: dict[str, int] = {}
+            for lib in libs:
+                key = lib.get("key", "")
+                if not key:
+                    continue
+                try:
+                    cnt_r = await c.get(
+                        f"/library/sections/{key}/all",
+                        params={"X-Plex-Container-Start": 0, "X-Plex-Container-Size": 0},
+                    )
+                    mc = cnt_r.json().get("MediaContainer", {})
+                    lib_counts[key] = int(mc.get("totalSize", mc.get("size", 0)))
+                except Exception:
+                    lib_counts[key] = lib.get("count") or 0
+
+            # Active streams
+            sessions = 0
+            try:
+                sess_r = await c.get("/status/sessions")
+                sessions = int(sess_r.json().get("MediaContainer", {}).get("size", 0))
+            except Exception:
+                pass
 
         data = {
-            "server_name":    server.get("friendlyName", "Plex"),
-            "version":        server.get("version", ""),
-            "platform":       server.get("platform", ""),
-            "libraries":      [
+            "server_name": server.get("friendlyName", "Plex"),
+            "version":     server.get("version", ""),
+            "platform":    server.get("platform", ""),
+            "sessions":    sessions,
+            "libraries": [
                 {
-                    "title": l.get("title"),
-                    "type":  l.get("type"),
-                    "count": l.get("count", 0),
+                    "key":   l.get("key", ""),
+                    "title": l.get("title", ""),
+                    "type":  l.get("type", ""),
+                    "count": lib_counts.get(l.get("key", ""), l.get("count") or 0),
                 }
                 for l in libs
             ],

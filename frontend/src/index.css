@@ -1057,16 +1057,64 @@ body::before {
 
 /* ── Responsive ── */
 @media (max-width: 768px) {
-  .app-header {
-    flex-direction: column;
-    align-items: flex-start;
+  /* Header */
+  .app-header,
+  .header {
+    padding: 0 14px;
+    height: auto;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding-top: 8px;
+    padding-bottom: 8px;
   }
 
+  .header-brand {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .header-title {
+    font-size: 14px;
+  }
+
+  .header-nav {
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 4px;
+  }
+
+  /* Hide nav label text, show only icons */
+  .nav-btn span,
+  .nav-tab span {
+    display: none;
+  }
+
+  .nav-btn,
+  .nav-tab {
+    padding: 8px 10px;
+    gap: 0;
+  }
+
+  /* Header badges — hide on very small screens */
+  .header-badges {
+    display: none;
+  }
+
+  /* Nav tabs */
   .nav-tabs {
     width: 100%;
     overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
+  /* Content area */
+  .app-content,
+  .main-content {
+    padding: 12px;
+  }
+
+  /* Grids collapse to single column */
   .g2,
   .g3,
   .g4,
@@ -1074,8 +1122,108 @@ body::before {
     grid-template-columns: 1fr;
   }
 
-  .app-content {
+  /* Cards */
+  .card {
+    padding: 14px;
+    border-radius: 12px;
+  }
+
+  .card:hover {
+    transform: none;
+  }
+
+  /* Stat cards */
+  .stat-value {
+    font-size: 22px;
+  }
+
+  /* Form grid */
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .form-section {
     padding: 16px;
+  }
+
+  /* Auth card */
+  .auth-card {
+    padding: 24px 18px;
+    border-radius: 16px;
+  }
+
+  /* Tables — horizontal scroll */
+  .data-table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    white-space: nowrap;
+  }
+
+  /* Diagram toolbar wraps */
+  .diagram-toolbar {
+    padding: 6px 8px;
+    gap: 6px;
+  }
+
+  .diagram-toolbar .btn {
+    padding: 7px 10px;
+    font-size: 12px;
+  }
+
+  /* Diagram node panel takes full width at bottom */
+  .diagram-node-panel {
+    min-width: unset;
+    width: 100%;
+  }
+
+  /* Toast position */
+  .toast-container {
+    bottom: 12px;
+    right: 12px;
+    left: 12px;
+  }
+
+  /* Node header */
+  .node-header {
+    padding: 8px 10px;
+  }
+
+  /* Buttons — smaller */
+  .btn {
+    padding: 8px 14px;
+    font-size: 12px;
+  }
+
+  /* Proxmox logo / logo block */
+  .logo h1 {
+    font-size: 18px;
+  }
+
+  .logo-icon {
+    width: 36px;
+    height: 36px;
+    font-size: 16px;
+  }
+}
+
+/* Extra small phones */
+@media (max-width: 420px) {
+  .app-content,
+  .main-content {
+    padding: 8px;
+  }
+
+  .card {
+    padding: 12px;
+  }
+
+  .stat-value {
+    font-size: 20px;
+  }
+
+  .auth-card {
+    padding: 20px 14px;
   }
 }
 /* ── Slide-in animation (toasts) ── */

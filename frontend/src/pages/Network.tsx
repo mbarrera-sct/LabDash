@@ -8,9 +8,10 @@ import {
 import '@xyflow/react/dist/style.css'
 import { api } from '../api'
 import InfraNode from '../components/InfraNode'
-import { NODE_TEMPLATES } from '../constants/nodeTypes'
+import { NODE_TEMPLATES, NODE_GROUPS, getNodeMeta } from '../constants/nodeTypes'
 
 interface Props { onToast: (t: 'success' | 'error', m: string) => void }
+
 
 const nodeTypes = { infra: InfraNode }
 
@@ -27,12 +28,18 @@ export default function Network({ onToast }: Props) {
     const [templates, setTemplates] = useState<{ id: string; name: string; description: string }[]>([])
     const [loadingTpl, setLoadingTpl] = useState(false)
     const [newNode, setNewNode] = useState({ name: '', ip: '', type: 'server' })
-    // Inline node editing
     const [editingNodeId, setEditingNodeId] = useState<string | null>(null)
     const [editingLabel, setEditingLabel] = useState('')
     const [editingIp, setEditingIp] = useState('')
+    const [showArp, setShowArp] = useState(false)
+    const [arpEntries, setArpEntries] = useState<any[]>([])
+    const [arpLoading, setArpLoading] = useState(false)
+    // selected node type per ARP IP
+    const [arpTypes, setArpTypes] = useState<Record<string, string>>({})
+    const [liveActive, setLiveActive] = useState(false)
     const rfWrapper = useRef<HTMLDivElement>(null)
 
+    // Load diagram on mount
     useEffect(() => {
         api.getDiagram().then((d: any) => {
             if (d.nodes?.length) {
@@ -50,7 +57,55 @@ export default function Network({ onToast }: Props) {
         api.listTemplates().then(setTemplates).catch(() => {})
     }, [])
 
-    // Keyboard: Delete/Backspace deletes selected elements in edit mode
+    // ── Live status polling ─────────────────────────────────────────────────────
+    // Polls /api/network/live every 15s, updates node status + edge colors
+    useEffect(() => {
+        const tick = async () => {
+            const live = await api.networkLive().catch(() => null)
+            if (!live) return
+            setNodes(ns => {
+                const updated = ns.map(n => {
+                    const ip     = (n.data as any).ip as string | undefined
+                    const ntype  = (n.data as any).ntype as string
+                    const isGw   = ntype === 'router' || ntype === 'wan'
+                    const status = ip === undefined
+                        ? 'unknown'
+                        : (live.ping[ip] ? 'online' : 'offline')
+                    return {
+                        ...n,
+                        data: {
+                            ...n.data,
+                            status,
+                            ...(isGw && live.snmp_in_kbps  != null ? { in_kbps:  live.snmp_in_kbps  } : {}),
+                            ...(isGw && live.snmp_out_kbps != null ? { out_kbps: live.snmp_out_kbps } : {}),
+                        }
+                    }
+                })
+                // Update edge colors based on endpoint status
+                const statusMap: Record<string, string> = {}
+                updated.forEach(n => { statusMap[n.id] = (n.data as any).status ?? 'unknown' })
+                setEdges(es => es.map(e => {
+                    const offline = statusMap[e.source] === 'offline' || statusMap[e.target] === 'offline'
+                    return {
+                        ...e,
+                        animated: !offline,
+                        style: {
+                            stroke:      offline ? 'rgba(252,129,129,0.45)' : 'var(--accent)',
+                            strokeWidth: 2,
+                        },
+                        markerEnd: { type: MarkerType.ArrowClosed, color: offline ? '#fc8181' : 'var(--accent)' },
+                    }
+                }))
+                return updated
+            })
+            setLiveActive(true)
+        }
+        tick()
+        const t = setInterval(tick, 15_000)
+        return () => clearInterval(t)
+    }, [setNodes, setEdges])
+
+    // Keyboard shortcuts in edit mode
     useEffect(() => {
         const handler = (e: KeyboardEvent) => {
             if (!editMode) return
@@ -76,7 +131,6 @@ export default function Network({ onToast }: Props) {
         [setEdges]
     )
 
-    // Double-click on node opens inline editor
     const onNodeDoubleClick: NodeMouseHandler = useCallback((_e, node) => {
         if (!editMode) return
         setEditingNodeId(node.id)
@@ -145,10 +199,52 @@ export default function Network({ onToast }: Props) {
         const a = document.createElement('a'); a.href = url
         a.download = `labdash-network-${new Date().toISOString().slice(0, 10)}.json`
         a.click(); URL.revokeObjectURL(url)
-        onToast('success', '✓ Diagrama exportado')
+        onToast('success', '✓ Diagrama exportado como JSON')
     }
 
-    // Close panels when switching modes
+    const handleExportPng = async () => {
+        const el = rfWrapper.current?.querySelector('.react-flow__viewport') as HTMLElement | null
+        if (!el) { onToast('error', 'No se puede capturar el diagrama'); return }
+        try {
+            // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+            // @ts-ignore — installed in Docker build
+            const { toPng } = await import('html-to-image')
+            const dataUrl = await toPng(el, { backgroundColor: '#0a0e1a', pixelRatio: 2 })
+            const a = document.createElement('a')
+            a.href = dataUrl
+            a.download = `labdash-network-${new Date().toISOString().slice(0, 10)}.png`
+            a.click()
+            onToast('success', '✓ Diagrama exportado como PNG')
+        } catch {
+            onToast('error', 'Error al exportar PNG')
+        }
+    }
+
+    const handleLoadArp = async () => {
+        setArpLoading(true)
+        try {
+            const r = await api.opnsenseArp()
+            setArpEntries(r.entries ?? [])
+            setShowArp(true)
+        } catch {
+            onToast('error', 'No se pudo cargar la tabla ARP')
+        } finally { setArpLoading(false) }
+    }
+
+    const handleAddFromArp = (entry: any) => {
+        const selectedType = arpTypes[entry.ip] || 'generic'
+        const label = entry.hostname || entry.ip
+        const tpl = getNodeMeta(selectedType)
+        const node: Node = {
+            id: uid(),
+            type: 'infra',
+            position: { x: 150 + Math.random() * 500, y: 150 + Math.random() * 350 },
+            data: { label, ip: entry.ip, ntype: selectedType, icon: tpl.icon, color: tpl.color },
+        }
+        setNodes((ns: Node[]) => [...ns, node])
+        onToast('success', `✓ Nodo "${label}" (${tpl.label}) añadido`)
+    }
+
     const toggleEditMode = () => {
         setEditMode(e => !e)
         setShowAddNode(false)
@@ -206,9 +302,39 @@ export default function Network({ onToast }: Props) {
                             <i className="fa-solid fa-layer-group" /> Templates
                         </button>
 
-                        <button className="btn btn-secondary" onClick={handleExport} disabled={nodes.length === 0}>
-                            <i className="fa-solid fa-file-export" /> Exportar
+                        <button className="btn btn-secondary" onClick={handleExport} disabled={nodes.length === 0} title="Exportar JSON">
+                            <i className="fa-solid fa-file-code" /> JSON
                         </button>
+                        <button className="btn btn-secondary" onClick={handleExportPng} disabled={nodes.length === 0} title="Exportar PNG">
+                            <i className="fa-solid fa-image" /> PNG
+                        </button>
+                        <button
+                            className={`btn ${showArp ? 'btn-primary' : 'btn-secondary'}`}
+                            onClick={showArp ? () => setShowArp(false) : handleLoadArp}
+                            disabled={arpLoading}
+                            title="Descubrir dispositivos desde tabla ARP de OPNsense"
+                        >
+                            <i className={`fa-solid ${arpLoading ? 'fa-spinner fa-spin' : 'fa-magnifying-glass-location'}`} />
+                            {arpLoading ? 'Buscando…' : 'ARP'}
+                        </button>
+
+                        {/* Live indicator */}
+                        {liveActive && (
+                            <div title="Monitorización de estado activa (actualiza cada 15s)" style={{
+                                display: 'flex', alignItems: 'center', gap: 5,
+                                padding: '4px 10px', borderRadius: 8, fontSize: 10,
+                                background: 'rgba(104,211,145,0.08)',
+                                border: '1px solid rgba(104,211,145,0.25)',
+                                color: '#68d391',
+                            }}>
+                                <span style={{
+                                    width: 6, height: 6, borderRadius: '50%',
+                                    background: '#68d391', boxShadow: '0 0 5px #68d391',
+                                    animation: 'pulse 2s infinite', display: 'inline-block',
+                                }} />
+                                Live
+                            </div>
+                        )}
 
                         {editMode && <>
                             <button className="btn btn-secondary" onClick={() => { setShowAddNode(s => !s); setShowTemplates(false) }}>
@@ -319,10 +445,91 @@ export default function Network({ onToast }: Props) {
                     </Panel>
                 )}
 
-                {/* ── Add node panel ── */}
+                {/* ── ARP discovery panel ── */}
+                {showArp && !editingNodeId && !showTemplates && (
+                    <Panel position="top-right">
+                        <div className="diagram-node-panel" style={{ minWidth: 340, maxHeight: 420, overflowY: 'auto' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+                                <h4 style={{ margin: 0 }}>
+                                    <i className="fa-solid fa-magnifying-glass-location" style={{ marginRight: 8, color: 'var(--accent6)' }} />
+                                    ARP — Dispositivos detectados
+                                </h4>
+                                <button className="btn btn-secondary" style={{ padding: '3px 8px', fontSize: 11 }}
+                                    onClick={() => setShowArp(false)}>
+                                    <i className="fa-solid fa-xmark" />
+                                </button>
+                            </div>
+                            {arpEntries.length === 0 ? (
+                                <p style={{ color: 'var(--muted)', fontSize: 12 }}>Sin entradas ARP. Configura OPNsense en Settings.</p>
+                            ) : arpEntries.map((e, i) => {
+                                const alreadyAdded = nodes.some((n: Node) => (n.data as any)?.ip === e.ip)
+                                const selType = arpTypes[e.ip] || 'generic'
+                                const selTpl = getNodeMeta(selType)
+                                return (
+                                    <div key={i} style={{
+                                        padding: '8px 0', borderBottom: '1px solid rgba(255,255,255,0.05)',
+                                    }}>
+                                        {/* IP + hostname row */}
+                                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: alreadyAdded ? 0 : 6 }}>
+                                            <div style={{ flex: 1, minWidth: 0 }}>
+                                                {e.hostname && (
+                                                    <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', marginBottom: 1 }}>
+                                                        {e.hostname}
+                                                    </div>
+                                                )}
+                                                <div style={{ fontSize: 11, fontFamily: 'JetBrains Mono, monospace', color: 'var(--accent)' }}>
+                                                    {e.ip}
+                                                </div>
+                                                <div style={{ fontSize: 9.5, color: 'var(--muted)', marginTop: 1 }}>
+                                                    {e.mac || '—'}
+                                                    {e.interface && <span style={{ marginLeft: 6, opacity: 0.6 }}>[{e.interface}]</span>}
+                                                </div>
+                                            </div>
+                                            {alreadyAdded && (
+                                                <span style={{ fontSize: 10, color: 'var(--muted)', flexShrink: 0, marginTop: 2 }}>ya existe</span>
+                                            )}
+                                        </div>
+                                        {/* Type selector + add button */}
+                                        {!alreadyAdded && (
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                                <i className={`fa-solid ${selTpl.icon}`} style={{ color: selTpl.color, fontSize: 12, width: 14, textAlign: 'center' }} />
+                                                <select
+                                                    value={selType}
+                                                    onChange={ev => setArpTypes(prev => ({ ...prev, [e.ip]: ev.target.value }))}
+                                                    style={{
+                                                        flex: 1, background: 'rgba(255,255,255,0.05)',
+                                                        border: '1px solid var(--border)', borderRadius: 6,
+                                                        color: 'var(--text)', fontSize: 10.5, padding: '3px 6px',
+                                                        outline: 'none', cursor: 'pointer',
+                                                    }}
+                                                >
+                                                    {NODE_TEMPLATES.map((t: { type: string; label: string; group: string }) => (
+                                                        <option key={t.type} value={t.type}>{t.group} — {t.label}</option>
+                                                    ))}
+                                                </select>
+                                                <button
+                                                    onClick={() => handleAddFromArp(e)}
+                                                    style={{
+                                                        background: 'rgba(104,211,145,0.1)', border: '1px solid rgba(104,211,145,0.3)',
+                                                        borderRadius: 6, color: '#68d391', cursor: 'pointer',
+                                                        padding: '4px 9px', fontSize: 11, flexShrink: 0, whiteSpace: 'nowrap',
+                                                    }}
+                                                >
+                                                    <i className="fa-solid fa-plus" /> Añadir
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
+                                )
+                            })}
+                        </div>
+                    </Panel>
+                )}
+
+                {/* ── Add node panel — grouped icon picker ── */}
                 {editMode && showAddNode && !editingNodeId && (
                     <Panel position="top-right">
-                        <div className="diagram-node-panel">
+                        <div className="diagram-node-panel" style={{ minWidth: 340, maxWidth: 380 }}>
                             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
                                 <h4 style={{ margin: 0 }}>
                                     <i className="fa-solid fa-plus" style={{ marginRight: 8, color: 'var(--accent2)' }} />
@@ -335,21 +542,31 @@ export default function Network({ onToast }: Props) {
                             </div>
 
                             <div className="form-group" style={{ marginBottom: 10 }}>
-                                <label>Tipo</label>
-                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 4 }}>
-                                    {NODE_TEMPLATES.map(t => (
-                                        <button key={t.type}
-                                            onClick={() => setNewNode(n => ({ ...n, type: t.type }))}
-                                            style={{
-                                                padding: '4px 9px', borderRadius: 8, fontSize: 10.5, cursor: 'pointer',
-                                                border: `1px solid ${newNode.type === t.type ? t.color : 'var(--border)'}`,
-                                                background: newNode.type === t.type ? `${t.color}22` : 'transparent',
-                                                color: newNode.type === t.type ? t.color : 'var(--muted)',
-                                                transition: 'all .15s',
-                                            }}>
-                                            <i className={`fa-solid ${t.icon}`} style={{ marginRight: 4 }} />
-                                            {t.label.split('/')[0].trim()}
-                                        </button>
+                                <label>Tipo de dispositivo</label>
+                                <div style={{ maxHeight: 260, overflowY: 'auto', paddingRight: 4, marginTop: 6 }}>
+                                    {NODE_GROUPS.map((group: string) => (
+                                        <div key={group} style={{ marginBottom: 8 }}>
+                                            <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: 1.5, textTransform: 'uppercase', color: 'var(--muted)', marginBottom: 4 }}>
+                                                {group}
+                                            </div>
+                                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                                                {NODE_TEMPLATES.filter((t: { group: string }) => t.group === group).map((t: { type: string; icon: string; label: string; color: string }) => (
+                                                    <button key={t.type}
+                                                        onClick={() => setNewNode(n => ({ ...n, type: t.type }))}
+                                                        title={t.label}
+                                                        style={{
+                                                            padding: '4px 8px', borderRadius: 7, fontSize: 10.5, cursor: 'pointer',
+                                                            border: `1px solid ${newNode.type === t.type ? t.color : 'var(--border)'}`,
+                                                            background: newNode.type === t.type ? `${t.color}22` : 'rgba(255,255,255,0.02)',
+                                                            color: newNode.type === t.type ? t.color : 'var(--muted)',
+                                                            transition: 'all .15s', display: 'flex', alignItems: 'center', gap: 4,
+                                                        }}>
+                                                        <i className={`fa-solid ${t.icon}`} />
+                                                        <span style={{ fontSize: 9.5 }}>{t.label.split('/')[0].trim()}</span>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
                                     ))}
                                 </div>
                             </div>

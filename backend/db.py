@@ -1,4 +1,4 @@
-"""SQLite config + diagram store + auth."""
+"""SQLite config + diagram store + auth + metrics + events + alerts."""
 import json, os, time
 import aiosqlite
 
@@ -21,15 +21,49 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at INTEGER NOT NULL,
     is_temp    INTEGER DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS metrics (
+    ts    INTEGER NOT NULL,
+    key   TEXT NOT NULL,
+    value REAL NOT NULL,
+    PRIMARY KEY (ts, key)
+);
+CREATE INDEX IF NOT EXISTS idx_metrics_key_ts ON metrics (key, ts);
+CREATE TABLE IF NOT EXISTS events (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts      INTEGER NOT NULL,
+    level   TEXT NOT NULL,
+    source  TEXT NOT NULL,
+    message TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events (ts);
+CREATE TABLE IF NOT EXISTS uptime_log (
+    ts   INTEGER NOT NULL,
+    host TEXT NOT NULL,
+    up   INTEGER NOT NULL,
+    PRIMARY KEY (ts, host)
+);
+CREATE INDEX IF NOT EXISTS idx_uptime_host_ts ON uptime_log (host, ts);
+CREATE TABLE IF NOT EXISTS alert_rules (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    metric_key  TEXT NOT NULL,
+    operator    TEXT NOT NULL,
+    threshold   REAL NOT NULL,
+    notify_url  TEXT DEFAULT '',
+    cooldown_s  INTEGER DEFAULT 3600,
+    enabled     INTEGER DEFAULT 1,
+    last_fired  INTEGER DEFAULT 0
+);
 """
 
-async def _db():
-    return aiosqlite.connect(DB_PATH)
+# ── Init ──────────────────────────────────────────────────────────────────────
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(_CREATE)
         await db.commit()
+
+# ── Config ────────────────────────────────────────────────────────────────────
 
 async def get_setting(key: str, default: str = "") -> str:
     async with aiosqlite.connect(DB_PATH) as db:
@@ -63,6 +97,8 @@ async def get_settings(keys: list[str]) -> dict:
                 result[k] = row[0] if row else ""
     return result
 
+# ── Diagram ───────────────────────────────────────────────────────────────────
+
 async def get_diagram() -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT data FROM diagram WHERE id=1") as cur:
@@ -77,7 +113,7 @@ async def save_diagram(data: dict):
         )
         await db.commit()
 
-# ── Auth helpers ──────────────────────────────────────────────────────────────
+# ── Auth ──────────────────────────────────────────────────────────────────────
 
 async def count_users() -> int:
     async with aiosqlite.connect(DB_PATH) as db:
@@ -136,7 +172,6 @@ async def disable_totp(user_id: int):
         await db.commit()
 
 async def set_totp_secret(user_id: int, secret: str):
-    """Store pending TOTP secret (not yet enabled)."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE users SET totp_secret=? WHERE id=?", (secret, user_id)
@@ -181,4 +216,151 @@ async def delete_user(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
         await db.execute("DELETE FROM users WHERE id=?", (user_id,))
+        await db.commit()
+
+# ── Metrics ───────────────────────────────────────────────────────────────────
+
+async def insert_metric(ts: int, key: str, value: float):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO metrics (ts, key, value) VALUES (?,?,?)",
+            (ts, key, float(value))
+        )
+        await db.commit()
+
+async def batch_insert_metrics(rows: list[tuple]):
+    """Insert multiple (ts, key, value) tuples in a single connection."""
+    if not rows:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executemany(
+            "INSERT OR REPLACE INTO metrics (ts, key, value) VALUES (?,?,?)",
+            [(ts, key, float(val)) for ts, key, val in rows]
+        )
+        await db.commit()
+
+async def get_metrics(key: str, hours: int = 24, limit: int = 200) -> list[dict]:
+    since = int(time.time()) - hours * 3600
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT ts, value FROM metrics WHERE key=? AND ts>=? ORDER BY ts ASC LIMIT ?",
+            (key, since, limit)
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+async def get_metric_latest(key: str) -> float | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT value FROM metrics WHERE key=? ORDER BY ts DESC LIMIT 1", (key,)
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else None
+
+async def purge_old_metrics(days: int = 7):
+    cutoff = int(time.time()) - days * 86400
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM metrics WHERE ts < ?", (cutoff,))
+        await db.commit()
+
+# ── Events ────────────────────────────────────────────────────────────────────
+
+async def insert_event(ts: int, level: str, source: str, message: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO events (ts, level, source, message) VALUES (?,?,?,?)",
+            (ts, level, source, message)
+        )
+        # Keep only last 500 events
+        await db.execute(
+            "DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY ts DESC LIMIT 500)"
+        )
+        await db.commit()
+
+async def get_events(limit: int = 50) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, ts, level, source, message FROM events ORDER BY ts DESC LIMIT ?",
+            (limit,)
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+# ── Uptime log ────────────────────────────────────────────────────────────────
+
+async def insert_uptime(ts: int, host: str, up: bool):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO uptime_log (ts, host, up) VALUES (?,?,?)",
+            (ts, host, 1 if up else 0)
+        )
+        await db.commit()
+
+async def batch_insert_uptime(rows: list[tuple]):
+    """Insert multiple (ts, host, up) tuples in a single connection."""
+    if not rows:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executemany(
+            "INSERT OR REPLACE INTO uptime_log (ts, host, up) VALUES (?,?,?)",
+            [(ts, host, 1 if up else 0) for ts, host, up in rows]
+        )
+        await db.commit()
+
+async def get_uptime_pct(host: str, hours: int = 24) -> float:
+    since = int(time.time()) - hours * 3600
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) as total, SUM(up) as up_count FROM uptime_log WHERE host=? AND ts>=?",
+            (host, since)
+        ) as cur:
+            row = await cur.fetchone()
+            total, up_count = row
+            if not total:
+                return -1.0
+            return round((up_count or 0) / total * 100, 1)
+
+async def purge_old_uptime(days: int = 30):
+    cutoff = int(time.time()) - days * 86400
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM uptime_log WHERE ts < ?", (cutoff,))
+        await db.commit()
+
+# ── Alert rules ───────────────────────────────────────────────────────────────
+
+async def get_alert_rules() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM alert_rules ORDER BY id") as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+async def create_alert_rule(
+    name: str, metric_key: str, operator: str,
+    threshold: float, notify_url: str = "", cooldown_s: int = 3600
+) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO alert_rules (name, metric_key, operator, threshold, notify_url, cooldown_s) VALUES (?,?,?,?,?,?)",
+            (name, metric_key, operator, threshold, notify_url, cooldown_s)
+        )
+        await db.commit()
+        return cur.lastrowid
+
+async def delete_alert_rule(rule_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM alert_rules WHERE id=?", (rule_id,))
+        await db.commit()
+
+async def toggle_alert_rule(rule_id: int, enabled: bool):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE alert_rules SET enabled=? WHERE id=?", (1 if enabled else 0, rule_id)
+        )
+        await db.commit()
+
+async def update_alert_last_fired(rule_id: int, ts: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE alert_rules SET last_fired=? WHERE id=?", (ts, rule_id)
+        )
         await db.commit()
