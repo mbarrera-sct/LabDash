@@ -1,4 +1,7 @@
-"""SQLite config + diagram store + auth + metrics + events + alerts."""
+"""SQLite config + diagram store + auth + metrics + events + alerts.
+When DATABASE_URL env var is set (postgres://...) all functions are replaced
+by the asyncpg-based implementation in db_pg.py.
+"""
 import json, os, time
 import aiosqlite
 
@@ -13,7 +16,8 @@ CREATE TABLE IF NOT EXISTS users (
     username      TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
     totp_secret   TEXT,
-    totp_enabled  INTEGER DEFAULT 0
+    totp_enabled  INTEGER DEFAULT 0,
+    role          TEXT DEFAULT 'admin'
 );
 CREATE TABLE IF NOT EXISTS sessions (
     token      TEXT PRIMARY KEY,
@@ -54,6 +58,37 @@ CREATE TABLE IF NOT EXISTS alert_rules (
     enabled     INTEGER DEFAULT 1,
     last_fired  INTEGER DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS audit_log (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts       INTEGER NOT NULL,
+    username TEXT NOT NULL,
+    action   TEXT NOT NULL,
+    detail   TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log (ts);
+CREATE TABLE IF NOT EXISTS alert_history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          INTEGER NOT NULL,
+    rule_id     INTEGER NOT NULL,
+    rule_name   TEXT NOT NULL,
+    metric_key  TEXT NOT NULL,
+    value       REAL NOT NULL,
+    threshold   REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_alert_history_ts ON alert_history (ts);
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL,
+    endpoint    TEXT NOT NULL UNIQUE,
+    p256dh      TEXT NOT NULL,
+    auth        TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS alert_silences (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id     INTEGER NOT NULL,
+    until_ts    INTEGER NOT NULL
+);
 """
 
 # ── Init ──────────────────────────────────────────────────────────────────────
@@ -68,13 +103,35 @@ async def init_db():
             "PRAGMA temp_store=MEMORY;"
             "PRAGMA mmap_size=134217728;"  # 128 MB
         )
+        # Migrations: add columns if they don't exist yet
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'admin'")
+        except Exception:
+            pass  # column already exists
+        # Create push_subscriptions table if not exists (already in _CREATE for fresh installs)
+        try:
+            await db.execute(
+                "CREATE TABLE IF NOT EXISTS push_subscriptions ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, "
+                "endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL, "
+                "created_at INTEGER NOT NULL)"
+            )
+        except Exception:
+            pass
+        try:
+            await db.execute(
+                "CREATE TABLE IF NOT EXISTS alert_silences ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, rule_id INTEGER NOT NULL, until_ts INTEGER NOT NULL)"
+            )
+        except Exception:
+            pass
         await db.commit()
 
 # ── Config ────────────────────────────────────────────────────────────────────
 # In-memory settings cache to avoid a DB round-trip on every API call
 _settings_cache: dict = {}       # key -> value
 _settings_cache_ts: float = 0.0
-_SETTINGS_CACHE_TTL = 30         # seconds
+_SETTINGS_CACHE_TTL = 300        # seconds (5 min)
 
 
 def _invalidate_settings_cache() -> None:
@@ -169,7 +226,7 @@ async def get_user_by_username(username: str) -> dict | None:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT id, username, password_hash, totp_secret, totp_enabled FROM users WHERE username=?",
+            "SELECT id, username, password_hash, totp_secret, totp_enabled, role FROM users WHERE username=?",
             (username,)
         ) as cur:
             row = await cur.fetchone()
@@ -179,11 +236,16 @@ async def get_user_by_id(user_id: int) -> dict | None:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT id, username, password_hash, totp_secret, totp_enabled FROM users WHERE id=?",
+            "SELECT id, username, password_hash, totp_secret, totp_enabled, role FROM users WHERE id=?",
             (user_id,)
         ) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None
+
+async def update_user_role(user_id: int, role: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET role=? WHERE id=?", (role, user_id))
+        await db.commit()
 
 async def update_user_password(user_id: int, password_hash: str):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -242,7 +304,7 @@ async def list_users() -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT id, username, totp_enabled FROM users ORDER BY id"
+            "SELECT id, username, totp_enabled, role FROM users ORDER BY id"
         ) as cur:
             rows = await cur.fetchall()
             return [dict(r) for r in rows]
@@ -399,3 +461,136 @@ async def update_alert_last_fired(rule_id: int, ts: int):
             "UPDATE alert_rules SET last_fired=? WHERE id=?", (ts, rule_id)
         )
         await db.commit()
+
+
+# ── Audit log ─────────────────────────────────────────────────────────────────
+
+async def insert_audit(ts: int, username: str, action: str, detail: str = ""):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO audit_log (ts, username, action, detail) VALUES (?,?,?,?)",
+            (ts, username, action, detail)
+        )
+        await db.execute(
+            "DELETE FROM audit_log WHERE id NOT IN (SELECT id FROM audit_log ORDER BY ts DESC LIMIT 1000)"
+        )
+        await db.commit()
+
+
+async def get_audit_log(limit: int = 100) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, ts, username, action, detail FROM audit_log ORDER BY ts DESC LIMIT ?",
+            (limit,)
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+# ── Alert history ──────────────────────────────────────────────────────────────
+
+async def insert_alert_history(ts: int, rule_id: int, rule_name: str, metric_key: str, value: float, threshold: float):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO alert_history (ts, rule_id, rule_name, metric_key, value, threshold) VALUES (?,?,?,?,?,?)",
+            (ts, rule_id, rule_name, metric_key, float(value), float(threshold))
+        )
+        await db.execute(
+            "DELETE FROM alert_history WHERE id NOT IN (SELECT id FROM alert_history ORDER BY ts DESC LIMIT 500)"
+        )
+        await db.commit()
+
+
+async def get_alert_history(limit: int = 100) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, ts, rule_id, rule_name, metric_key, value, threshold FROM alert_history ORDER BY ts DESC LIMIT ?",
+            (limit,)
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+# ── Active sessions ────────────────────────────────────────────────────────────
+
+async def save_push_subscription(user_id: int, endpoint: str, p256dh: str, auth_key: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, created_at) VALUES (?,?,?,?,?)"
+            " ON CONFLICT(endpoint) DO UPDATE SET p256dh=excluded.p256dh, auth=excluded.auth",
+            (user_id, endpoint, p256dh, auth_key, int(time.time()))
+        )
+        await db.commit()
+
+async def delete_push_subscription(endpoint: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM push_subscriptions WHERE endpoint=?", (endpoint,))
+        await db.commit()
+
+async def get_push_subscriptions() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM push_subscriptions") as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+async def list_active_sessions(user_id: int) -> list[dict]:
+    now = int(time.time())
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT token, expires_at, is_temp FROM sessions WHERE user_id=? AND expires_at>? AND is_temp=0 ORDER BY expires_at DESC",
+            (user_id, now)
+        ) as cur:
+            rows = await cur.fetchall()
+            return [{"token_hint": r["token"][:8] + "…", "expires_at": r["expires_at"], "token": r["token"]} for r in rows]
+
+
+# ── Alert silences ────────────────────────────────────────────────────────────
+
+async def silence_rule(rule_id: int, until_ts: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO alert_silences (rule_id, until_ts) VALUES (?,?)",
+            (rule_id, until_ts)
+        )
+        await db.commit()
+
+async def is_silenced(rule_id: int) -> bool:
+    now = int(time.time())
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT until_ts FROM alert_silences WHERE rule_id=? AND until_ts>?",
+            (rule_id, now)
+        ) as cur:
+            return await cur.fetchone() is not None
+
+async def get_silences() -> list[dict]:
+    now = int(time.time())
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT rule_id, until_ts FROM alert_silences WHERE until_ts>? ORDER BY rule_id",
+            (now,)
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+async def update_alert_rule(rule_id: int, name: str, metric_key: str, operator: str,
+                            threshold: float, notify_url: str, cooldown_s: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE alert_rules SET name=?, metric_key=?, operator=?, threshold=?, notify_url=?, cooldown_s=? WHERE id=?",
+            (name, metric_key, operator, threshold, notify_url, cooldown_s, rule_id)
+        )
+        await db.commit()
+
+# ── PostgreSQL override ───────────────────────────────────────────────────────
+# If DATABASE_URL is configured, replace every public function with the
+# asyncpg implementation so the rest of the codebase is unaware of the backend.
+if os.environ.get("DATABASE_URL", "").startswith("postgres"):
+    import sys, importlib
+    _pg = importlib.import_module("db_pg")
+    _current = sys.modules[__name__]
+    for _name in dir(_pg):
+        if not _name.startswith("_"):
+            setattr(_current, _name, getattr(_pg, _name))
+    del _pg, _current, _name

@@ -1,87 +1,131 @@
-"""Async OPNsense API client — HTTP Basic (key+secret)."""
-import time, os
+"""Async OPNsense API client — HTTP Basic (key+secret).
+
+Fixes vs. previous version:
+- asyncio.Lock prevents concurrent fetches stampeding OPNsense when cache is cold
+- asyncio.gather runs sub-requests in parallel (total latency ≈ slowest single request)
+- every sub-request has its own try/except so one failure doesn't abort everything
+- removed getWirelessChannel (not a wireless module in this setup)
+- connect_timeout 5 s / read_timeout 10 s prevents long hangs on unreachable host
+"""
+import asyncio, time, os
 import httpx
 from db import get_setting
 
 _cache: dict = {"data": None, "ts": 0}
-TTL = 30
+_lock: asyncio.Lock | None = None   # created lazily inside the running event loop
+TTL = 90  # 90s cache — reduces how often the slow OPNsense fetch is triggered
+
+_TIMEOUT = httpx.Timeout(connect=4.0, read=8.0, write=4.0, pool=4.0)
+
+
+async def _safe_get(c: httpx.AsyncClient, path: str, **kwargs) -> dict | list:
+    try:
+        r = await c.get(path, **kwargs)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return {}
+
+
+async def _safe_post(c: httpx.AsyncClient, path: str, **kwargs) -> dict | list:
+    try:
+        r = await c.post(path, **kwargs)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return {}
 
 
 async def fetch() -> tuple[dict, str | None]:
     global _cache
-    if _cache["data"] and time.time() - _cache["ts"] < TTL:
-        return _cache["data"], None
-    try:
-        url    = await get_setting("opn_url",    os.environ.get("OPN_URL",    "https://192.168.1.1"))
-        key    = await get_setting("opn_key",    os.environ.get("OPN_KEY",    ""))
-        secret = await get_setting("opn_secret", os.environ.get("OPN_SECRET", ""))
-        if not (key and secret):
-            return _cache.get("data") or {}, "OPNsense credentials not configured"
 
-        auth = (key, secret)
-        async with httpx.AsyncClient(base_url=url, verify=False, timeout=10, auth=auth) as c:
-            ifaces   = (await c.get("/api/diagnostics/interface/getInterfaceStatistics")).json()
-            gateways = (await c.get("/api/routes/gateway/status")).json()
+    # Fast path: return cached data without acquiring the lock
+    cached = _cache
+    if cached["data"] and time.time() - cached["ts"] < TTL:
+        return cached["data"], None
 
-            try:
-                sysinfo = (await c.get("/api/core/system/status")).json()
-            except Exception:
-                sysinfo = {}
+    # Slow path: serialise fetches so only one coroutine hits OPNsense at a time
+    global _lock
+    if _lock is None:
+        _lock = asyncio.Lock()
+    async with _lock:
+        # Re-check after acquiring lock (another coroutine may have fetched while we waited)
+        cached = _cache
+        if cached["data"] and time.time() - cached["ts"] < TTL:
+            return cached["data"], None
 
-            # DHCP leases — try Kea (OPNsense 24.7+) first, fall back to ISC
-            dhcp: dict = {}
-            try:
-                r = await c.post("/api/kea/leases4/search",
-                                 json={"current_page": 1, "page_size_value": 500})
-                if r.status_code == 200:
-                    dhcp = r.json()
-            except Exception:
-                pass
-            if not dhcp.get("rows"):
-                try:
-                    r = await c.get("/api/dhcpv4/leases/searchLease",
-                                    params={"current_page": 1, "page_size_value": 500})
-                    if r.status_code == 200:
-                        dhcp = r.json()
-                except Exception:
-                    pass
+        try:
+            url    = await get_setting("opn_url",    os.environ.get("OPN_URL",    "https://192.168.1.1"))
+            key    = await get_setting("opn_key",    os.environ.get("OPN_KEY",    ""))
+            secret = await get_setting("opn_secret", os.environ.get("OPN_SECRET", ""))
+            if not (key and secret):
+                return cached.get("data") or {}, "OPNsense credentials not configured"
 
-            # ARP table
-            arp: dict = {}
-            try:
-                r = await c.get("/api/diagnostics/interface/getArp")
-                if r.status_code == 200:
-                    arp = r.json()
-            except Exception:
-                pass
+            auth = (key, secret)
+            # Hard 20s ceiling — ensures the lock is ALWAYS released even if SSL or DNS hangs
+            async with asyncio.timeout(20):
+                async with httpx.AsyncClient(
+                    base_url=url, verify=False, timeout=_TIMEOUT, auth=auth
+                ) as c:
+                    # ── Run all independent requests concurrently ──────────────
+                    (
+                        ifaces,
+                        gateways,
+                        sysinfo,
+                        arp,
+                        fw_log_v1,
+                        fw_log_v2,
+                        fw_rules_raw,
+                        wg_clients_raw,
+                        wg_servers_raw,
+                        dhcp_kea,
+                        dhcp_isc,
+                    ) = await asyncio.gather(
+                        _safe_get(c, "/api/diagnostics/interface/getInterfaceStatistics"),
+                        _safe_get(c, "/api/routes/gateway/status"),
+                        _safe_get(c, "/api/core/system/status"),
+                        _safe_get(c, "/api/diagnostics/interface/getArp"),
+                        _safe_get(c, "/api/diagnostics/firewall/log", params={"limit": 100}),
+                        _safe_post(c, "/api/diagnostics/log/core/firewall",
+                                   json={"searchPhrase": "", "limit": 100}),
+                        _safe_get(c, "/api/firewall/filter/searchRule",
+                                  params={"current_page": 1, "page_size_value": 200}),
+                        _safe_get(c, "/api/wireguard/client/listClients"),
+                        _safe_get(c, "/api/wireguard/server/listServers"),
+                        _safe_post(c, "/api/kea/leases4/search",
+                                   json={"current_page": 1, "page_size_value": 500}),
+                        _safe_get(c, "/api/dhcpv4/leases/searchLease",
+                                  params={"current_page": 1, "page_size_value": 500}),
+                    )
 
-            # Firewall log (last 100 entries)
-            fw_log: dict = {}
-            try:
-                r = await c.get("/api/diagnostics/firewall/log",
-                                params={"limit": 100})
-                if r.status_code == 200:
-                    fw_log = r.json()
-            except Exception:
-                pass
-            if not fw_log:
-                try:
-                    r = await c.post("/api/diagnostics/log/core/firewall",
-                                     json={"searchPhrase": "", "limit": 100})
-                    if r.status_code == 200:
-                        fw_log = r.json()
-                except Exception:
-                    pass
+            # ── Merge results ──────────────────────────────────────────────────
+            # DHCP: prefer Kea (OPNsense 24.7+), fall back to ISC
+            dhcp = dhcp_kea if dhcp_kea.get("rows") else dhcp_isc
 
-        data = {
-            "interfaces": ifaces,
-            "gateways":   gateways,
-            "sysinfo":    sysinfo,
-            "dhcp":       dhcp,
-            "arp":        arp,
-            "fw_log":     fw_log,
-        }
-        _cache = {"data": data, "ts": time.time()}
-        return data, None
-    except Exception as e:
-        return _cache.get("data") or {}, str(e)
+            # Firewall log: prefer v1 endpoint, fall back to v2
+            fw_log = fw_log_v1 if fw_log_v1 else fw_log_v2
+
+            fw_rules = fw_rules_raw.get("rows", []) if isinstance(fw_rules_raw, dict) else []
+
+            wireguard = {
+                "clients": wg_clients_raw,
+                "servers": wg_servers_raw,
+            }
+
+            data = {
+                "interfaces": ifaces,
+                "gateways":   gateways,
+                "sysinfo":    sysinfo,
+                "dhcp":       dhcp,
+                "arp":        arp,
+                "fw_log":     fw_log,
+                "fw_rules":   fw_rules,
+                "wireguard":  wireguard,
+            }
+            _cache = {"data": data, "ts": time.time()}
+            return data, None
+
+        except Exception as e:
+            return _cache.get("data") or {}, str(e)

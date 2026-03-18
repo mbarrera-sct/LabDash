@@ -81,6 +81,7 @@ export interface CurrentUser {
     id: number
     username: string
     totp_enabled: boolean
+    role?: string
 }
 
 export const authApi = {
@@ -100,10 +101,11 @@ export const authApi = {
 }
 
 export const usersApi = {
-    list: () => get<{ users: { id: number; username: string; totp_enabled: boolean }[] }>("/api/users"),
-    create: (username: string, password: string) =>
-        post<{ ok: boolean }>("/api/users", { username, password }),
+    list: () => get<{ users: { id: number; username: string; totp_enabled: boolean; role: string }[] }>("/api/users"),
+    create: (username: string, password: string, role?: string) =>
+        post<{ ok: boolean }>("/api/users", { username, password, role: role ?? "admin" }),
     delete: (id: number) => del<{ ok: boolean }>(`/api/users/${id}`),
+    setRole: (id: number, role: string) => patch<{ ok: boolean }>(`/api/users/${id}/role`, { role }),
 }
 
 // ── Alert rules ───────────────────────────────────────────────────────────────
@@ -120,12 +122,16 @@ export interface AlertRule {
 }
 
 export const alertsApi = {
-    list: () => get<{ rules: AlertRule[] }>("/api/alert-rules"),
+    list:   () => get<{ rules: AlertRule[] }>("/api/alert-rules"),
     create: (rule: Omit<AlertRule, "id" | "enabled" | "last_fired">) =>
         post<{ ok: boolean; id: number }>("/api/alert-rules", rule),
+    update: (id: number, rule: Partial<AlertRule>) =>
+        patch<{ ok: boolean }>(`/api/alert-rules/${id}`, rule),
     delete: (id: number) => del<{ ok: boolean }>(`/api/alert-rules/${id}`),
     toggle: (id: number, enabled: boolean) =>
         patch<{ ok: boolean }>(`/api/alert-rules/${id}/toggle?enabled=${enabled}`),
+    test:   (id: number) =>
+        post<{ ok: boolean; message: string }>(`/api/alert-rules/${id}/test`, {}),
 }
 
 // ── Main API ──────────────────────────────────────────────────────────────────
@@ -152,6 +158,7 @@ export const api = {
     k8sWorkloads: () => get("/api/k8s/workloads"),
     unraidSystem: () => get("/api/unraid/system"),
     unraidDocker: () => get("/api/unraid/docker"),
+    unraidDisks:  () => get<{ status: string; capacity: Record<string, number>; disks: any[]; parities: any[]; error: string|null }>("/api/unraid/disks"),
     plexInfo:     () => get("/api/plex/info"),
     immichStats:  () => get("/api/immich/stats"),
     haStates:     () => get("/api/ha/states"),
@@ -191,4 +198,62 @@ export const api = {
         get<{ ping: Record<string, boolean>; snmp_in_kbps: number | null; snmp_out_kbps: number | null }>(
             "/api/network/live"
         ),
+
+    // Portainer
+    portainerData:    () => get<{ data: any; error: string|null }>("/api/portainer/data"),
+    portainerCompose: (stackId: number) => get<{ stack_id: number; compose: string }>(`/api/portainer/stacks/${stackId}/compose`),
+    // Uptime Kuma
+    uptimeKumaMonitors: () => get<{ data: any; error: string|null }>("/api/uptime-kuma/monitors"),
+    // OPNsense extras
+    opnsenseFwRules:  () => get<{ rules: any[]; error: string|null }>("/api/opnsense/fw-rules"),
+    opnsenseWifi:     () => get<{ clients: any[]; error: string|null }>("/api/opnsense/wifi"),
+    opnsenseWireguard: () => get<{ data: any; error: string|null }>("/api/opnsense/wireguard"),
+    // Audit log
+    getAuditLog:      (limit?: number) => get<{ entries: any[] }>(`/api/audit-log${limit ? `?limit=${limit}` : ''}`),
+    // Alert history
+    getAlertHistory:  (limit?: number) => get<{ entries: any[] }>(`/api/alert-history${limit ? `?limit=${limit}` : ''}`),
+    // Sessions
+    getSessions:      () => get<{ sessions: { token_hint: string; expires_at: number; token: string }[] }>("/api/sessions"),
+    revokeSession:    (token: string) => del<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(token)}`),
+    // Backup / Restore
+    restore:          (payload: unknown) => post<{ ok: boolean; restored: string[] }>("/api/restore", { payload }),
+    // Proxmox extras
+    proxmoxNodeDetail: (node: string) => get<{ node: string; cpu_temp: number|null; disks: any[]; sensors: any }>(`/api/proxmox/node-detail/${encodeURIComponent(node)}`),
+    proxmoxConfig:    () => get<{ pve_url: string }>("/api/proxmox/config"),
+    // Tailscale
+    tailscaleDevices: () => get<{ data: any; error: string|null }>("/api/tailscale/devices"),
+    // Wake-on-LAN
+    wol:              (mac: string, broadcast?: string) => post<{ ok: boolean; mac: string }>("/api/wol", { mac, broadcast: broadcast ?? "255.255.255.255" }),
+
+    // Setup wizard
+    setupStatus:   () => get<{ needs_setup: boolean }>("/api/setup/status"),
+    setupComplete: (settings: Record<string, string>) =>
+        post<{ ok: boolean }>("/api/setup/complete", { settings }),
+
+    // Push notifications
+    pushVapidKey:     () => get<{ key: string | null; error?: string }>("/api/push/vapid-public-key"),
+    pushSubscribe:    (sub: { endpoint: string; p256dh: string; auth: string }) => post<{ ok: boolean }>("/api/push/subscribe", sub),
+    pushUnsubscribe:  (endpoint: string) => fetch("/api/push/unsubscribe", { method: "DELETE", headers: { "Content-Type": "application/json", ...{ Authorization: `Bearer ${localStorage.getItem("labdash_token") ?? ""}` } }, body: JSON.stringify({ endpoint }) }).then(r => r.json()),
+
+    // Telegram
+    telegramStatus: () => get<{ configured: boolean; bot: { username: string; first_name: string } | null; chat_id: string | null; daily_digest: boolean }>("/api/telegram/status"),
+    telegramConfig: (body: { token: string; chat_id?: string; daily_digest?: boolean; webhook_url?: string }) =>
+        post<{ ok: boolean; error?: string }>("/api/telegram/config", body),
+    telegramTest:   () => post<{ ok: boolean; message?: string; error?: string }>("/api/telegram/test", {}),
+    telegramDelete: () => del<{ ok: boolean }>("/api/telegram/config"),
+
+    // Alert silences
+    alertSilences:  () => get<{ silences: { rule_id: number; until_ts: number }[] }>("/api/alert-silences"),
+    silenceAlert:   (rule_id: number, hours: number) =>
+        post<{ ok: boolean; until_ts: number }>(`/api/alert-rules/${rule_id}/silence`, { hours }),
+
+    // Alert history
+    getAlertHistory: (limit?: number) =>
+        get<{ entries: any[] }>(`/api/alert-history${limit ? `?limit=${limit}` : ""}`),
+
+    // Dashboard bundle
+    dashboardBundle: () => get<{ status: any; proxmox: any; opnsense: any; k8s: any; services: any }>("/api/dashboard/bundle"),
+
+    // Re-export alertsApi for Notifications page convenience
+    alertsApi,
 }

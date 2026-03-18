@@ -22,6 +22,34 @@
   --font-mono: 'JetBrains Mono', monospace;
 }
 
+/* Light mode */
+.light-mode {
+  --bg: #f0f4f8;
+  --bg2: #e2e8f0;
+  --bg3: #cbd5e0;
+  --card: rgba(0, 0, 0, 0.04);
+  --border: rgba(66, 153, 225, 0.25);
+  --text: #1a202c;
+  --muted: #718096;
+  --glow: rgba(66, 153, 225, 0.2);
+}
+
+.light-mode body {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.light-mode body::before {
+  background-image:
+    linear-gradient(rgba(66, 153, 225, .06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(66, 153, 225, .06) 1px, transparent 1px);
+}
+
+.light-mode .header,
+.light-mode .app-header {
+  background: rgba(240, 244, 248, 0.97);
+}
+
 *,
 *::before,
 *::after {
@@ -1284,3 +1312,155 @@ body::before {
   opacity: .5;
   cursor: not-allowed;
 }
+
+/* ── Light mode ─────────────────────────────────────────────────────────── */
+html.light-mode {
+  --bg:     #f0f4f8;
+  --bg2:    #e2e8f0;
+  --bg3:    #cbd5e0;
+  --card:   rgba(255, 255, 255, 0.85);
+  --border: rgba(99, 120, 160, 0.25);
+  --accent: #2b6cb0;
+  --accent2: #276749;
+  --accent3: #c53030;
+  --accent4: #975a16;
+  --accent5: #553c9a;
+  --accent6: #285e61;
+  --text:   #1a202c;
+  --muted:  #4a5568;
+  --glow:   rgba(43, 108, 176, 0.2);
+}
+
+html.light-mode body {
+  background: var(--bg);
+  color: var(--text);
+}
+
+html.light-mode body::before {
+  background-image:
+    linear-gradient(rgba(43, 108, 176, .04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(43, 108, 176, .04) 1px, transparent 1px);
+}
+
+html.light-mode .header,
+html.light-mode .app-header {
+  background: rgba(240, 244, 248, 0.97);
+  border-bottom-color: var(--border);
+}
+
+html.light-mode .card {
+  background: rgba(255, 255, 255, 0.9);
+  border-color: rgba(99, 120, 160, 0.2);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+}
+
+html.light-mode .stat-card {
+  background: rgba(255,255,255,0.9);
+}
+
+html.light-mode input,
+html.light-mode select,
+html.light-mode textarea {
+  background: #fff;
+  border-color: rgba(99, 120, 160, 0.3);
+  color: var(--text);
+}
+
+html.light-mode input:focus,
+html.light-mode select:focus {
+  border-color: rgba(43, 108, 176, 0.5);
+  box-shadow: 0 0 0 3px rgba(43, 108, 176, 0.1);
+}
+
+html.light-mode .form-section {
+  background: rgba(255, 255, 255, 0.7);
+  border-color: rgba(99, 120, 160, 0.2);
+}
+
+html.light-mode .data-table thead tr {
+  background: rgba(226, 232, 240, 0.7);
+}
+
+html.light-mode .data-table tbody tr:hover {
+  background: rgba(226, 232, 240, 0.5);
+}
+
+html.light-mode .data-table {
+  border-color: rgba(99, 120, 160, 0.15);
+}
+
+html.light-mode .nav-btn {
+  color: #4a5568;
+}
+
+html.light-mode .nav-btn:hover {
+  background: rgba(43, 108, 176, 0.08);
+  border-color: rgba(43, 108, 176, 0.2);
+  color: var(--text);
+}
+
+html.light-mode .nav-btn.active {
+  background: linear-gradient(135deg, #2b6cb0, #4299e1);
+  color: #fff;
+}
+
+html.light-mode .diagram-toolbar,
+html.light-mode .diagram-node-panel {
+  background: rgba(240, 244, 248, 0.97);
+  border-color: rgba(99, 120, 160, 0.25);
+}
+
+html.light-mode .btn-secondary {
+  background: rgba(226, 232, 240, 0.8);
+  border-color: rgba(99, 120, 160, 0.25);
+  color: #2d3748;
+}
+
+html.light-mode .btn-secondary:hover {
+  background: rgba(203, 213, 224, 0.9);
+}
+
+html.light-mode .sec-title {
+  color: #2d3748;
+}
+
+html.light-mode .kv-key {
+  color: #4a5568;
+}
+
+html.light-mode .kv-val {
+  color: #1a202c;
+}
+
+html.light-mode .node-header {
+  background: rgba(255,255,255,0.6);
+  border-color: rgba(99, 120, 160, 0.15);
+}
+
+html.light-mode .prog-bar {
+  background: rgba(0,0,0,0.08);
+}
+
+html.light-mode .error-banner {
+  background: rgba(254, 215, 215, 0.6);
+  border-color: rgba(197, 48, 48, 0.3);
+  color: #c53030;
+}
+
+html.light-mode .auth-card {
+  background: rgba(255,255,255,0.95);
+  border-color: rgba(99, 120, 160, 0.2);
+}
+
+html.light-mode .auth-input {
+  background: #fff;
+  border-color: rgba(99, 120, 160, 0.3);
+  color: var(--text);
+}
+
+html.light-mode .val-blue   { color: #2b6cb0 !important; }
+html.light-mode .val-green  { color: #276749 !important; }
+html.light-mode .val-yellow { color: #975a16 !important; }
+html.light-mode .val-red    { color: #c53030 !important; }
+html.light-mode .val-purple { color: #553c9a !important; }
+html.light-mode .val-teal   { color: #285e61 !important; }

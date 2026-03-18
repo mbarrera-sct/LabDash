@@ -139,25 +139,43 @@ async def get_temp_token_user(request: Request) -> tuple[str, dict]:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired temp token")
     return token, user
 
-# ── Rate limiting (in-memory, simple) ────────────────────────────────────────
+# ── Rate limiting (in-memory, per-IP and per-username) ───────────────────────
 
 _login_attempts: dict[str, list[float]] = {}
-_MAX_ATTEMPTS = 10
-_WINDOW = 300  # 5 minutes
+_lockouts: dict[str, float] = {}          # key → locked_until timestamp
+_MAX_ATTEMPTS = 5
+_WINDOW       = 300   # 5 min sliding window
+_LOCKOUT_S    = 600   # 10 min hard lockout after _MAX_ATTEMPTS
 
-def check_rate_limit(key: str) -> None:
+def check_rate_limit(ip: str, username: str = "") -> None:
     now = time.time()
-    attempts = [t for t in _login_attempts.get(key, []) if now - t < _WINDOW]
-    _login_attempts[key] = attempts
-    if len(attempts) >= _MAX_ATTEMPTS:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Too many login attempts. Try again in {_WINDOW // 60} minutes.",
-        )
-    _login_attempts[key].append(now)
+    for key in filter(None, [ip, username]):
+        # Check active lockout first
+        locked_until = _lockouts.get(key, 0)
+        if now < locked_until:
+            retry_after = int(locked_until - now)
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Account locked. Try again in {retry_after // 60}m {retry_after % 60}s.",
+                headers={"Retry-After": str(retry_after)},
+            )
+        # Slide the window
+        attempts = [t for t in _login_attempts.get(key, []) if now - t < _WINDOW]
+        _login_attempts[key] = attempts
+        if len(attempts) >= _MAX_ATTEMPTS:
+            _lockouts[key] = now + _LOCKOUT_S
+            _login_attempts[key] = []
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Too many failed attempts. Locked for {_LOCKOUT_S // 60} minutes.",
+                headers={"Retry-After": str(_LOCKOUT_S)},
+            )
+        _login_attempts[key].append(now)
 
-def clear_rate_limit(key: str) -> None:
-    _login_attempts.pop(key, None)
+def clear_rate_limit(ip: str, username: str = "") -> None:
+    for key in filter(None, [ip, username]):
+        _login_attempts.pop(key, None)
+        _lockouts.pop(key, None)
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 

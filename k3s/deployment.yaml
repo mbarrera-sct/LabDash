@@ -14,25 +14,42 @@ metadata:
   namespace: labdash
 type: Opaque
 stringData:
-  PVE_URL:        "https://192.168.1.7:8006"
-  PVE_USER:       "root@pam"
-  PVE_PASS:       ""
-  OPN_URL:        "https://192.168.1.1"
-  OPN_KEY:        ""
-  OPN_SECRET:     ""
-  K8S_URL:        ""
-  K8S_TOKEN:      ""
-  UNRAID_URL:     ""
-  UNRAID_KEY:     ""
-  PLEX_URL:       ""
-  PLEX_TOKEN:     ""
-  IMMICH_URL:     ""
-  IMMICH_KEY:     ""
-  HA_URL:         ""
-  HA_TOKEN:       ""
-  HA_ENTITIES:    ""
-  LABDASH_USER:   "admin"
-  LABDASH_PASS:   "changeme"
+  # Proxmox
+  PVE_URL:               "https://192.168.1.7:8006"
+  PVE_USER:              "root@pam"
+  PVE_PASS:              ""
+  # OPNsense
+  OPN_URL:               "https://192.168.1.1"
+  OPN_KEY:               ""
+  OPN_SECRET:            ""
+  # Kubernetes / k3s
+  K8S_URL:               ""
+  K8S_TOKEN:             ""
+  # Unraid
+  UNRAID_URL:            ""
+  UNRAID_KEY:            ""
+  # Plex
+  PLEX_URL:              ""
+  PLEX_TOKEN:            ""
+  # Immich
+  IMMICH_URL:            ""
+  IMMICH_KEY:            ""
+  # Home Assistant
+  HA_URL:                ""
+  HA_TOKEN:              ""
+  HA_ENTITIES:           ""
+  # Portainer
+  PORTAINER_URL:         ""
+  PORTAINER_TOKEN:       ""
+  # Uptime Kuma
+  UPTIME_KUMA_URL:       ""
+  UPTIME_KUMA_SLUG:      ""
+  # Tailscale
+  TAILSCALE_TAILNET:     ""
+  TAILSCALE_TOKEN:       ""
+  # Initial admin credentials (used on first boot only)
+  LABDASH_USER:          "admin"
+  LABDASH_PASS:          "changeme"
 
 ---
 # ─── PVC (SQLite persistence) ────────────────────────────────────────────────
@@ -45,7 +62,7 @@ spec:
   accessModes: [ReadWriteOnce]
   resources:
     requests:
-      storage: 1Gi
+      storage: 2Gi
 
 ---
 # ─── ServiceAccount + RBAC (K8s API read) ────────────────────────────────────
@@ -62,7 +79,7 @@ metadata:
   name: labdash-reader
 rules:
   - apiGroups: [""]
-    resources: ["nodes", "pods", "namespaces"]
+    resources: ["nodes", "pods", "namespaces", "services"]
     verbs: ["get", "list"]
   - apiGroups: ["apps"]
     resources: ["deployments", "daemonsets", "statefulsets"]
@@ -102,27 +119,40 @@ spec:
         app: labdash
     spec:
       serviceAccountName: labdash
+      securityContext:
+        sysctls: []          # NET_RAW is handled via capabilities below
       containers:
         - name: labdash
-          image: miguelix/labdash:1.2
-          imagePullPolicy: IfNotPresent
+          image: miguelix/labdash:latest
+          imagePullPolicy: Always
           ports:
-            - containerPort: 8080
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: snmp-trap
+              containerPort: 1620
+              protocol: UDP
           envFrom:
             - secretRef:
                 name: labdash-secrets
           env:
             - name: DB_PATH
               value: /data/labdash.db
+            - name: SNMP_TRAP_PORT
+              value: "1620"
           volumeMounts:
             - name: data
               mountPath: /data
+          securityContext:
+            capabilities:
+              add: ["NET_RAW"]   # required for ICMP ping
           livenessProbe:
             httpGet:
               path: /healthz
               port: 8080
             initialDelaySeconds: 15
             periodSeconds: 30
+            failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /healthz
@@ -142,7 +172,7 @@ spec:
             claimName: labdash-data
 
 ---
-# ─── Service ─────────────────────────────────────────────────────────────────
+# ─── Service (HTTP + SNMP trap UDP) ──────────────────────────────────────────
 apiVersion: v1
 kind: Service
 metadata:
@@ -152,8 +182,14 @@ spec:
   selector:
     app: labdash
   ports:
-    - port: 80
+    - name: http
+      port: 80
       targetPort: 8080
+      protocol: TCP
+    - name: snmp-trap
+      port: 1620
+      targetPort: 1620
+      protocol: UDP
   type: ClusterIP
 
 ---
@@ -165,21 +201,79 @@ metadata:
   namespace: labdash
   annotations:
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     cert-manager.io/cluster-issuer: letsencrypt-prod
 spec:
   ingressClassName: nginx
   tls:
-  - hosts:
-    - labdash.cloud.mielito.com
-    secretName: labdash-tls-prod
+    - hosts:
+        - labdash.cloud.mielito.com
+      secretName: labdash-tls-prod
   rules:
-  - host: labdash.cloud.mielito.com
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: labdash
-            port:
-              number: 80
+    - host: labdash.cloud.mielito.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: labdash
+                port:
+                  number: 80
+
+---
+# ─── CronJob: SQLite backup to another PVC (daily at 03:00) ──────────────────
+# Requires a second PVC named labdash-backups (or change to an NFS/S3 volume)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: labdash-backup
+  namespace: labdash
+spec:
+  schedule: "0 3 * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              image: alpine:3.19
+              command:
+                - sh
+                - -c
+                - |
+                  DATE=$(date +%Y%m%d_%H%M%S)
+                  cp /data/labdash.db /backups/labdash_${DATE}.db
+                  # Keep only the 7 most recent backups
+                  ls -t /backups/labdash_*.db | tail -n +8 | xargs -r rm -f
+                  echo "Backup done: labdash_${DATE}.db"
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+                  readOnly: true
+                - name: backups
+                  mountPath: /backups
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: labdash-data
+            - name: backups
+              persistentVolumeClaim:
+                claimName: labdash-backups   # create separately
+
+---
+# ─── PVC for backups (adjust storageClassName to your NFS/Longhorn class) ────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: labdash-backups
+  namespace: labdash
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+  # storageClassName: longhorn   # uncomment and set your storage class

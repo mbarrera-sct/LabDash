@@ -1,10 +1,11 @@
 """SNMP switch poller — IF-MIB interface status + bandwidth.
 Polls every 10 s; calculates KB/s from 64-bit counter deltas.
+Supports multiple targets via snmp_targets JSON config.
 """
-import asyncio, os, time
+import asyncio, json, os, time
 import db
 
-_cache: dict = {"data": None, "ts": 0}
+_cache: dict = {}           # target_name -> {"data": ..., "ts": ...}
 _prev_counters: dict = {}   # f"{host}:{idx}" -> {ts, in, out}
 _CACHE_TTL = 10             # seconds
 
@@ -16,26 +17,67 @@ _OID_ifAlias       = "1.3.6.1.2.1.31.1.1.1.18"
 _OID_ifName        = "1.3.6.1.2.1.31.1.1.1.1"
 
 
-async def fetch() -> tuple[dict | None, str | None]:
-    now = time.time()
-    if _cache["data"] and now - _cache["ts"] < _CACHE_TTL:
-        return _cache["data"], None
-
+async def get_targets() -> list[dict]:
+    """Return list of {name, host, community, port} from snmp_targets JSON, with legacy fallback."""
+    targets_json = await db.get_setting("snmp_targets", "")
+    if targets_json:
+        try:
+            targets = json.loads(targets_json)
+            if isinstance(targets, list) and targets:
+                return targets
+        except Exception:
+            pass
+    # Legacy single-target fallback
     host      = os.environ.get("SNMP_HOST")      or await db.get_setting("snmp_host")
     community = os.environ.get("SNMP_COMMUNITY") or await db.get_setting("snmp_community") or "public"
     port_raw  = os.environ.get("SNMP_PORT")      or await db.get_setting("snmp_port") or "161"
+    if host:
+        return [{"name": "default", "host": host, "community": community, "port": port_raw}]
+    return []
 
+
+async def fetch() -> tuple[dict | None, str | None]:
+    """Fetch from first configured target (backward compat)."""
+    targets = await get_targets()
+    if not targets:
+        return None, "SNMP no configurado"
+    t = targets[0]
+    return await _fetch_target(t)
+
+
+async def fetch_all() -> tuple[list[dict], list[str]]:
+    """Fetch from all configured targets, return list of results with target name."""
+    targets = await get_targets()
+    if not targets:
+        return [], ["SNMP no configurado"]
+    results, errors = [], []
+    for t in targets:
+        data, err = await _fetch_target(t)
+        if data:
+            results.append({"target": t.get("name", "default"), "host": t.get("host", ""), **data})
+        if err:
+            errors.append(f"{t.get('name', 'default')}: {err}")
+    return results, errors
+
+
+async def _fetch_target(target: dict) -> tuple[dict | None, str | None]:
+    name      = target.get("name", "default")
+    host      = target.get("host", "")
+    community = target.get("community", "public")
+    port_raw  = str(target.get("port", "161"))
     if not host:
         return None, "SNMP no configurado"
-
+    now = time.time()
+    cached = _cache.get(name, {})
+    if cached.get("data") and now - cached.get("ts", 0) < _CACHE_TTL:
+        return cached["data"], None
     try:
         udp_port = int(port_raw)
         data = await asyncio.to_thread(_poll_sync, host, community, udp_port)
-        _cache["data"] = data
-        _cache["ts"]   = now
+        _cache[name] = {"data": data, "ts": now}
         return data, None
     except Exception as exc:
-        return _cache["data"], str(exc)
+        return cached.get("data"), str(exc)
 
 
 def _poll_sync(host: str, community: str, port: int = 161) -> dict:
@@ -99,13 +141,13 @@ def _poll_sync(host: str, community: str, port: int = 161) -> dict:
         except (TypeError, ValueError):
             up = False
 
-        name  = str(names.get(idx)   or descrs.get(idx) or f"if{idx}")
+        name_str  = str(names.get(idx)   or descrs.get(idx) or f"if{idx}")
         alias = str(aliases.get(idx) or "")
-        descr = str(descrs.get(idx)  or name)
+        descr = str(descrs.get(idx)  or name_str)
 
         ports.append({
             "idx":      int(idx),
-            "name":     name,
+            "name":     name_str,
             "descr":    descr,
             "alias":    alias,
             "up":       up,

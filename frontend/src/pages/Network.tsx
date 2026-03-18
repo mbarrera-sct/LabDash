@@ -37,7 +37,40 @@ export default function Network({ onToast }: Props) {
     // selected node type per ARP IP
     const [arpTypes, setArpTypes] = useState<Record<string, string>>({})
     const [liveActive, setLiveActive] = useState(false)
+    const [showWifi, setShowWifi] = useState(false)
+    const [wifiClients, setWifiClients] = useState<any[]>([])
+    const [wifiLoading, setWifiLoading] = useState(false)
+    const [autoTopoLoading, setAutoTopoLoading] = useState(false)
+    // ── Infra selector ──────────────────────────────────────────────────────────
+    interface InfraItem { id: string; label: string; ip: string; ntype: string; icon: string; color: string; group: string; badge?: string }
+    const [showInfra, setShowInfra] = useState(false)
+    const [infraLoading, setInfraLoading] = useState(false)
+    const [infraItems, setInfraItems] = useState<InfraItem[]>([])
+    const [selectedInfra, setSelectedInfra] = useState<Set<string>>(new Set())
     const rfWrapper = useRef<HTMLDivElement>(null)
+    const importRef = useRef<HTMLInputElement>(null)
+
+    // ── Auto-save state ─────────────────────────────────────────────────────────
+    const dirtyRef   = useRef(false)
+    const lastSaveRef = useRef<number>(Date.now())
+    const [autoSaveInfo, setAutoSaveInfo] = useState<string | null>(null)
+
+    // ── Auto-save: save dirty diagram every 5 minutes ───────────────────────────
+    useEffect(() => {
+        const t = setInterval(async () => {
+            if (!dirtyRef.current) return
+            const age = Math.round((Date.now() - lastSaveRef.current) / 1000)
+            if (age < 300) return          // less than 5 min since last save
+            try {
+                await api.saveDiagram({ nodes, edges })
+                lastSaveRef.current = Date.now()
+                dirtyRef.current = false
+                const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                setAutoSaveInfo(`Auto-guardado a las ${ts}`)
+            } catch { /* silent */ }
+        }, 30_000)                         // check every 30s
+        return () => clearInterval(t)
+    }, [nodes, edges])
 
     // Load diagram on mount
     useEffect(() => {
@@ -153,10 +186,42 @@ export default function Network({ onToast }: Props) {
         setSaving(true)
         try {
             await api.saveDiagram({ nodes, edges })
+            lastSaveRef.current = Date.now()
+            dirtyRef.current = false
+            setAutoSaveInfo(null)
             onToast('success', '✓ Diagrama guardado')
         } catch {
             onToast('error', 'Error al guardar el diagrama')
         } finally { setSaving(false) }
+    }
+
+    const handleImportJson = (e: { target: HTMLInputElement }) => {
+        const file = e.target.files?.[0]
+        if (!file) return
+        e.target.value = ''
+        const reader = new FileReader()
+        reader.onload = (ev) => {
+            try {
+                const data = JSON.parse(ev.target?.result as string)
+                if (!data.nodes && !data.edges) {
+                    onToast('error', 'JSON inválido: no contiene nodos ni edges')
+                    return
+                }
+                if (data.nodes?.length) {
+                    setNodes((data.nodes as Node[]) || [])
+                    _nid = (data.nodes as any[]).reduce((max: number, n: any) => {
+                        const num = parseInt(n.id.replace('n', ''), 10)
+                        return isNaN(num) ? max : Math.max(max, num)
+                    }, 0)
+                }
+                if (data.edges?.length) setEdges((data.edges as Edge[]) || [])
+                dirtyRef.current = true
+                onToast('success', `✓ Diagrama importado (${data.nodes?.length ?? 0} nodos, ${data.edges?.length ?? 0} conexiones)`)
+            } catch {
+                onToast('error', 'Error al leer el archivo JSON')
+            }
+        }
+        reader.readAsText(file)
     }
 
     const handleLoadTemplate = async (id: string) => {
@@ -190,6 +255,13 @@ export default function Network({ onToast }: Props) {
     const handleDeleteSelected = () => {
         setNodes(ns => ns.filter(n => !n.selected))
         setEdges(es => es.filter(e => !e.selected))
+    }
+
+    const handleClearAll = () => {
+        if (!confirm('¿Borrar todos los nodos y conexiones del diagrama? Esta acción no se puede deshacer (hasta que guardes).')) return
+        setNodes([])
+        setEdges([])
+        dirtyRef.current = true
     }
 
     const handleExport = () => {
@@ -243,6 +315,276 @@ export default function Network({ onToast }: Props) {
         }
         setNodes((ns: Node[]) => [...ns, node])
         onToast('success', `✓ Nodo "${label}" (${tpl.label}) añadido`)
+    }
+
+    const handleLoadWifi = async () => {
+        setWifiLoading(true)
+        try {
+            const r = await api.opnsenseWifi()
+            setWifiClients(r.clients ?? [])
+            setShowWifi(true)
+        } catch {
+            onToast('error', 'No se pudo cargar los clientes WiFi')
+        } finally { setWifiLoading(false) }
+    }
+
+    const handleAutoTopology = async () => {
+        setAutoTopoLoading(true)
+        try {
+            // Fetch ARP + DHCP + interfaces in parallel
+            const [arpRes, dhcpRes, ifacesRes] = await Promise.allSettled([
+                api.opnsenseArp(),
+                api.opnsenseDhcp(),
+                api.opnsenseIfaces(),
+            ])
+            const entries: any[] = arpRes.status === 'fulfilled' ? (arpRes.value.entries ?? []) : []
+            const leases: any[]  = dhcpRes.status === 'fulfilled' ? (dhcpRes.value.leases ?? []) : []
+
+            // Build hostname map from DHCP (more complete than ARP)
+            const dhcpHostname: Record<string, string> = {}
+            for (const l of leases) {
+                const ip = l.address || l['ip-address'] || l.ip || ''
+                const name = l.hostname || l['client-hostname'] || ''
+                if (ip && name) dhcpHostname[ip] = name
+            }
+
+            // Build OS interface name → OPNsense friendly label map (e.g. vtnet1 → HOMELAB)
+            const ifaceLabel: Record<string, string> = {}
+            if (ifacesRes.status === 'fulfilled') {
+                const raw = (ifacesRes.value as any)?.data ?? {}
+                const statsMap: Record<string, any> = raw?.statistics ?? (typeof raw === 'object' ? raw : {})
+                for (const [key, f] of Object.entries(statsMap) as [string, any][]) {
+                    if (typeof f !== 'object' || !f) continue
+                    const osName  = (f.name ?? '').toLowerCase()
+                    const label   = (key.match(/^\[(.+?)\]/)?.[1] ?? '').trim()
+                    if (osName && label) ifaceLabel[osName] = label
+                }
+            }
+            const friendlyIface = (raw: string) => ifaceLabel[raw.toLowerCase()] || raw
+
+            const existingIps  = new Set(nodes.map((n: Node) => (n.data as any)?.ip).filter(Boolean))
+            const newEntries = entries.filter(e => e.ip && !existingIps.has(e.ip))
+
+            if (newEntries.length === 0) {
+                onToast('success', 'No hay nuevos dispositivos en la tabla ARP')
+                return
+            }
+
+            // Group by interface (using friendly name)
+            const byIface: Record<string, any[]> = {}
+            for (const e of newEntries) {
+                const iface = friendlyIface(e.interface || 'LAN')
+                if (!byIface[iface]) byIface[iface] = []
+                byIface[iface].push(e)
+            }
+            const ifaceNames = Object.keys(byIface)
+
+            // Find existing router/switch nodes to use as anchors
+            const existingAnchors = nodes.filter((n: Node) => {
+                const ntype = (n.data as any)?.ntype
+                return ntype === 'router' || ntype === 'switch' || ntype === 'gateway'
+            })
+
+            // Compute layout: start below existing nodes to avoid overlapping
+            const existingMaxY = nodes.length > 0
+                ? Math.max(...nodes.map((n: Node) => (n.position?.y ?? 0))) + 220
+                : 80
+            const COL_W  = 240  // horizontal spacing between interface groups
+            const ROW_H  = 160  // vertical spacing between device rows
+            const COLS   = 4    // devices per row
+
+            const addedNodes: Node[] = []
+            const addedEdges: Edge[] = []
+
+            ifaceNames.forEach((iface, ifaceIdx) => {
+                const devices = byIface[iface]
+                const groupX  = 60 + ifaceIdx * (COLS * COL_W + 80)
+
+                // Pick or create anchor for this interface
+                let anchorId: string
+                if (existingAnchors.length > 0) {
+                    // Prefer anchor whose label matches the friendly iface name
+                    const match = existingAnchors.find((n: Node) =>
+                        (n.data as any)?.label?.toLowerCase() === iface.toLowerCase()
+                    ) ?? existingAnchors[0]
+                    anchorId = match.id
+                } else {
+                    // Create a segment/switch node for this interface
+                    const swMeta = getNodeMeta('switch')
+                    anchorId = uid()
+                    addedNodes.push({
+                        id: anchorId,
+                        type: 'infra',
+                        position: { x: groupX + (COLS * COL_W) / 2 - 60, y: existingMaxY },
+                        data: { label: iface, ip: '', ntype: 'switch', icon: swMeta.icon, color: swMeta.color },
+                    })
+                }
+
+                // Add device nodes + edges
+                const devBaseY = existingAnchors.length > 0 ? existingMaxY : existingMaxY + ROW_H
+                devices.forEach((entry, i) => {
+                    const label  = dhcpHostname[entry.ip] || entry.hostname || entry.ip
+                    const tpl    = getNodeMeta('generic')
+                    const nodeId = uid()
+                    addedNodes.push({
+                        id: nodeId,
+                        type: 'infra',
+                        position: { x: groupX + (i % COLS) * COL_W, y: devBaseY + Math.floor(i / COLS) * ROW_H },
+                        data: { label, ip: entry.ip, ntype: 'generic', icon: tpl.icon, color: tpl.color },
+                    })
+                    addedEdges.push({
+                        id: `ae-${anchorId}-${nodeId}`,
+                        source: anchorId,
+                        target: nodeId,
+                        animated: false,
+                        style: { stroke: 'var(--accent)', strokeWidth: 1 },
+                        markerEnd: { type: MarkerType.ArrowClosed, color: 'var(--accent)' },
+                    } as Edge)
+                })
+            })
+
+            setNodes((ns: Node[]) => [...ns, ...addedNodes])
+            setEdges((es: Edge[]) => [...es, ...addedEdges])
+            dirtyRef.current = true
+            const deviceCount = addedNodes.filter(n => (n.data as any).ntype !== 'switch').length
+            onToast('success', `✓ ${deviceCount} nodos y ${addedEdges.length} enlaces añadidos desde ARP`)
+        } catch {
+            onToast('error', 'No se pudo cargar la tabla ARP')
+        } finally { setAutoTopoLoading(false) }
+    }
+
+    const handleLoadInfra = async () => {
+        setInfraLoading(true)
+        setShowInfra(true)
+        try {
+            const [nodesRes, vmsRes, gwRes, tsRes] = await Promise.allSettled([
+                api.proxmoxNodes(),
+                api.proxmoxVMs(),
+                api.opnsenseGateways(),
+                api.tailscaleDevices(),
+            ])
+            const items: InfraItem[] = []
+
+            // Proxmox nodes
+            if (nodesRes.status === 'fulfilled') {
+                const raw = nodesRes.value as any
+                for (const n of raw.nodes ?? []) {
+                    items.push({
+                        id: `pv-node-${n.name}`,
+                        label: n.name,
+                        ip: '',
+                        ntype: 'server',
+                        icon: 'fa-server',
+                        color: '#63b3ed',
+                        group: 'Proxmox — Nodos',
+                        badge: n.status,
+                    })
+                }
+            }
+
+            // Proxmox VMs
+            if (vmsRes.status === 'fulfilled') {
+                const raw = vmsRes.value as any
+                for (const [nodeName, vms] of Object.entries(raw.by_node ?? {})) {
+                    for (const vm of (vms as any[])) {
+                        if (vm.template) continue
+                        items.push({
+                            id: `pv-vm-${vm.vmid}`,
+                            label: vm.name || `VM ${vm.vmid}`,
+                            ip: '',
+                            ntype: 'vm',
+                            icon: vm.type === 'qemu' ? 'fa-display' : 'fa-box',
+                            color: vm.status === 'running' ? '#68d391' : '#fc8181',
+                            group: `Proxmox — ${nodeName}`,
+                            badge: vm.status,
+                        })
+                    }
+                }
+            }
+
+            // OPNsense gateways
+            if (gwRes.status === 'fulfilled') {
+                const raw = gwRes.value as any
+                const gws = raw?.items ?? raw?.data?.items ?? []
+                for (const gw of gws) {
+                    items.push({
+                        id: `gw-${gw.name}`,
+                        label: gw.name,
+                        ip: gw.gwaddr || '',
+                        ntype: 'router',
+                        icon: 'fa-shield-halved',
+                        color: '#f6ad55',
+                        group: 'OPNsense — Gateways',
+                        badge: gw.status_translated || gw.status,
+                    })
+                }
+            }
+
+            // Tailscale devices
+            if (tsRes.status === 'fulfilled') {
+                const raw = tsRes.value as any
+                const devices = raw?.data?.devices ?? []
+                for (const d of devices) {
+                    const ip = d.addresses?.[0] ?? ''
+                    items.push({
+                        id: `ts-${d.id ?? d.hostname}`,
+                        label: d.hostname || d.name || ip,
+                        ip,
+                        ntype: 'vpn',
+                        icon: 'fa-shield-halved',
+                        color: '#63b3ed',
+                        group: 'Tailscale — Dispositivos',
+                        badge: d.online ? 'online' : 'offline',
+                    })
+                }
+            }
+
+            setInfraItems(items)
+        } catch {
+            onToast('error', 'Error cargando recursos de infraestructura')
+        } finally {
+            setInfraLoading(false)
+        }
+    }
+
+    const handleRemoveFromInfra = (item: InfraItem) => {
+        setNodes((ns: Node[]) => ns.filter((n: Node) => {
+            const nInfraId = (n.data as any)?.infraId
+            const nIp = (n.data as any)?.ip
+            if (nInfraId && nInfraId === item.id) return false
+            if (!nInfraId && item.ip && nIp === item.ip) return false
+            return true
+        }))
+        dirtyRef.current = true
+        onToast('success', `✓ "${item.label}" eliminado del mapa`)
+    }
+
+    const handleAddFromInfra = () => {
+        const existingIds = new Set(nodes.map((n: Node) => (n.data as any)?.infraId).filter(Boolean))
+        const existingIps = new Set(nodes.map((n: Node) => (n.data as any)?.ip).filter(Boolean))
+        const toAdd = infraItems.filter(item =>
+            selectedInfra.has(item.id) &&
+            !existingIds.has(item.id) &&
+            !(item.ip && existingIps.has(item.ip))
+        )
+        if (toAdd.length === 0) return
+        const newNodes: Node[] = toAdd.map((item, i) => ({
+            id: uid(),
+            type: 'infra',
+            position: { x: 200 + (i % 4) * 200, y: 150 + Math.floor(i / 4) * 160 },
+            data: {
+                label: item.label,
+                ip: item.ip,
+                ntype: item.ntype,
+                icon: item.icon,
+                color: item.color,
+                infraId: item.id,
+            },
+        }))
+        setNodes((ns: Node[]) => [...ns, ...newNodes])
+        setSelectedInfra(new Set())
+        dirtyRef.current = true
+        onToast('success', `✓ ${newNodes.length} nodo(s) añadido(s) al mapa`)
     }
 
     const toggleEditMode = () => {
@@ -308,6 +650,16 @@ export default function Network({ onToast }: Props) {
                         <button className="btn btn-secondary" onClick={handleExportPng} disabled={nodes.length === 0} title="Exportar PNG">
                             <i className="fa-solid fa-image" /> PNG
                         </button>
+                        <button className="btn btn-secondary" onClick={() => importRef.current?.click()} title="Importar diagrama desde archivo JSON">
+                            <i className="fa-solid fa-file-import" /> Importar
+                        </button>
+                        <input
+                            ref={importRef}
+                            type="file"
+                            accept=".json,application/json"
+                            style={{ display: 'none' }}
+                            onChange={handleImportJson}
+                        />
                         <button
                             className={`btn ${showArp ? 'btn-primary' : 'btn-secondary'}`}
                             onClick={showArp ? () => setShowArp(false) : handleLoadArp}
@@ -317,6 +669,47 @@ export default function Network({ onToast }: Props) {
                             <i className={`fa-solid ${arpLoading ? 'fa-spinner fa-spin' : 'fa-magnifying-glass-location'}`} />
                             {arpLoading ? 'Buscando…' : 'ARP'}
                         </button>
+                        <button
+                            className="btn btn-secondary"
+                            onClick={handleAutoTopology}
+                            disabled={autoTopoLoading}
+                            title="Auto-detectar topología desde ARP y añadir nodos no existentes"
+                        >
+                            <i className={`fa-solid ${autoTopoLoading ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'}`} />
+                            {autoTopoLoading ? 'Detectando…' : 'Auto-topo'}
+                        </button>
+                        <button
+                            className={`btn ${showWifi ? 'btn-primary' : 'btn-secondary'}`}
+                            onClick={showWifi ? () => setShowWifi(false) : handleLoadWifi}
+                            disabled={wifiLoading}
+                            title="Ver clientes WiFi desde OPNsense"
+                        >
+                            <i className={`fa-solid ${wifiLoading ? 'fa-spinner fa-spin' : 'fa-wifi'}`} />
+                            {wifiLoading ? 'Cargando…' : 'WiFi'}
+                        </button>
+                        <button
+                            className={`btn ${showInfra ? 'btn-primary' : 'btn-secondary'}`}
+                            onClick={showInfra ? () => setShowInfra(false) : handleLoadInfra}
+                            disabled={infraLoading}
+                            title="Seleccionar recursos de infraestructura controlada (Proxmox, OPNsense, Tailscale…)"
+                        >
+                            <i className={`fa-solid ${infraLoading ? 'fa-spinner fa-spin' : 'fa-layer-group'}`} />
+                            {infraLoading ? 'Cargando…' : 'Recursos'}
+                        </button>
+
+                        {/* Auto-save indicator */}
+                        {autoSaveInfo && (
+                            <div title="Último auto-guardado" style={{
+                                display: 'flex', alignItems: 'center', gap: 5,
+                                padding: '4px 10px', borderRadius: 8, fontSize: 10,
+                                background: 'rgba(99,179,237,0.07)',
+                                border: '1px solid rgba(99,179,237,0.2)',
+                                color: 'var(--muted)',
+                            }}>
+                                <i className="fa-solid fa-floppy-disk" style={{ color: 'var(--accent)', fontSize: 9 }} />
+                                {autoSaveInfo}
+                            </div>
+                        )}
 
                         {/* Live indicator */}
                         {liveActive && (
@@ -342,6 +735,9 @@ export default function Network({ onToast }: Props) {
                             </button>
                             <button className="btn btn-danger" onClick={handleDeleteSelected} title="Eliminar seleccionados (Del)">
                                 <i className="fa-solid fa-trash" /> Borrar
+                            </button>
+                            <button className="btn btn-danger" onClick={handleClearAll} title="Borrar todo el diagrama" style={{ opacity: 0.75 }}>
+                                <i className="fa-solid fa-trash-can" /> Todo
                             </button>
                             <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
                                 <i className={`fa-solid ${saving ? 'fa-spinner fa-spin' : 'fa-floppy-disk'}`} />
@@ -486,7 +882,22 @@ export default function Network({ onToast }: Props) {
                                                 </div>
                                             </div>
                                             {alreadyAdded && (
-                                                <span style={{ fontSize: 10, color: 'var(--muted)', flexShrink: 0, marginTop: 2 }}>ya existe</span>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0, marginTop: 2 }}>
+                                                    <span style={{ fontSize: 10, color: 'var(--muted)' }}>ya existe</span>
+                                                    {e.mac && (
+                                                        <button
+                                                            onClick={() => api.wol(e.mac).then(() => onToast('success', `WoL enviado a ${e.mac}`)).catch(() => onToast('error', 'Error al enviar WoL'))}
+                                                            title={`Wake-on-LAN → ${e.mac}`}
+                                                            style={{
+                                                                background: 'rgba(237,137,54,0.1)', border: '1px solid rgba(237,137,54,0.3)',
+                                                                borderRadius: 6, color: '#ed8936', cursor: 'pointer',
+                                                                padding: '3px 7px', fontSize: 10, whiteSpace: 'nowrap',
+                                                            }}
+                                                        >
+                                                            <i className="fa-solid fa-power-off" />
+                                                        </button>
+                                                    )}
+                                                </div>
                                             )}
                                         </div>
                                         {/* Type selector + add button */}
@@ -517,6 +928,19 @@ export default function Network({ onToast }: Props) {
                                                 >
                                                     <i className="fa-solid fa-plus" /> Añadir
                                                 </button>
+                                                {e.mac && (
+                                                    <button
+                                                        onClick={() => api.wol(e.mac).then(() => onToast('success', `WoL enviado a ${e.mac}`)).catch(() => onToast('error', 'Error al enviar WoL'))}
+                                                        title={`Wake-on-LAN → ${e.mac}`}
+                                                        style={{
+                                                            background: 'rgba(237,137,54,0.1)', border: '1px solid rgba(237,137,54,0.3)',
+                                                            borderRadius: 6, color: '#ed8936', cursor: 'pointer',
+                                                            padding: '4px 7px', fontSize: 11, flexShrink: 0,
+                                                        }}
+                                                    >
+                                                        <i className="fa-solid fa-power-off" />
+                                                    </button>
+                                                )}
                                             </div>
                                         )}
                                     </div>
@@ -525,6 +949,168 @@ export default function Network({ onToast }: Props) {
                         </div>
                     </Panel>
                 )}
+
+                {/* ── WiFi clients panel ── */}
+                {showWifi && !editingNodeId && !showTemplates && !showArp && (
+                    <Panel position="top-right">
+                        <div className="diagram-node-panel" style={{ minWidth: 320, maxHeight: 420, overflowY: 'auto' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+                                <h4 style={{ margin: 0 }}>
+                                    <i className="fa-solid fa-wifi" style={{ marginRight: 8, color: 'var(--accent2)' }} />
+                                    Clientes WiFi
+                                </h4>
+                                <button className="btn btn-secondary" style={{ padding: '3px 8px', fontSize: 11 }}
+                                    onClick={() => setShowWifi(false)}>
+                                    <i className="fa-solid fa-xmark" />
+                                </button>
+                            </div>
+                            {wifiClients.length === 0 ? (
+                                <p style={{ color: 'var(--muted)', fontSize: 12 }}>Sin clientes WiFi. Configura OPNsense en Settings.</p>
+                            ) : wifiClients.map((c: any, i: number) => (
+                                <div key={i} style={{ padding: '7px 0', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                                    <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', marginBottom: 2 }}>
+                                        {c.hostname || c.ip || c.mac || '—'}
+                                    </div>
+                                    <div style={{ fontSize: 11, color: 'var(--muted)', fontFamily: 'JetBrains Mono, monospace', display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                                        {c.ip && <span style={{ color: 'var(--accent)' }}>{c.ip}</span>}
+                                        {c.mac && <span>{c.mac}</span>}
+                                        {c.ssid && <span style={{ color: 'var(--accent2)' }}>{c.ssid}</span>}
+                                        {c.signal !== undefined && <span>señal: {c.signal} dBm</span>}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </Panel>
+                )}
+
+                {/* ── Infra resources panel ── */}
+                {showInfra && !editingNodeId && !showTemplates && !showArp && !showWifi && (() => {
+                    const existingIps = new Set(nodes.map((n: Node) => (n.data as any)?.ip).filter(Boolean))
+                    const existingInfraIds = new Set(nodes.map((n: Node) => (n.data as any)?.infraId).filter(Boolean))
+                    const groups = [...new Set(infraItems.map(i => i.group))]
+                    const selCount = selectedInfra.size
+                    return (
+                        <Panel position="top-right">
+                            <div className="diagram-node-panel" style={{ minWidth: 340, maxHeight: 460, display: 'flex', flexDirection: 'column' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, flexShrink: 0 }}>
+                                    <h4 style={{ margin: 0 }}>
+                                        <i className="fa-solid fa-layer-group" style={{ marginRight: 8, color: 'var(--accent)' }} />
+                                        Recursos de infraestructura
+                                    </h4>
+                                    <button className="btn btn-secondary" style={{ padding: '3px 8px', fontSize: 11 }}
+                                        onClick={() => setShowInfra(false)}>
+                                        <i className="fa-solid fa-xmark" />
+                                    </button>
+                                </div>
+
+                                {infraLoading ? (
+                                    <div style={{ padding: 24, textAlign: 'center', color: 'var(--muted)', fontSize: 12 }}>
+                                        <i className="fa-solid fa-spinner fa-spin" style={{ marginRight: 8 }} />
+                                        Cargando recursos…
+                                    </div>
+                                ) : infraItems.length === 0 ? (
+                                    <p style={{ color: 'var(--muted)', fontSize: 12 }}>
+                                        Sin recursos disponibles. Configura las integraciones en Settings.
+                                    </p>
+                                ) : (
+                                    <>
+                                        {/* Select all */}
+                                        <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexShrink: 0 }}>
+                                            <button className="btn btn-secondary" style={{ fontSize: 10, padding: '3px 8px' }}
+                                                onClick={() => {
+                                                    const selectable = infraItems.filter(item =>
+                                                        !existingInfraIds.has(item.id) && !(item.ip && existingIps.has(item.ip))
+                                                    )
+                                                    setSelectedInfra(new Set(selectable.map(i => i.id)))
+                                                }}>
+                                                Seleccionar todos
+                                            </button>
+                                            <button className="btn btn-secondary" style={{ fontSize: 10, padding: '3px 8px' }}
+                                                onClick={() => setSelectedInfra(new Set())}>
+                                                Limpiar
+                                            </button>
+                                        </div>
+
+                                        {/* Item list */}
+                                        <div style={{ overflowY: 'auto', flex: 1, marginBottom: 10 }}>
+                                            {groups.map(group => (
+                                                <div key={group} style={{ marginBottom: 12 }}>
+                                                    <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: 1.5, textTransform: 'uppercase', color: 'var(--muted)', marginBottom: 6 }}>
+                                                        {group}
+                                                    </div>
+                                                    {infraItems.filter(item => item.group === group).map(item => {
+                                                        const onMap = existingInfraIds.has(item.id) || (item.ip !== '' && existingIps.has(item.ip))
+                                                        const checked = selectedInfra.has(item.id)
+                                                        return (
+                                                            <div key={item.id} style={{
+                                                                display: 'flex', alignItems: 'center', gap: 8,
+                                                                padding: '5px 0', borderBottom: '1px solid rgba(255,255,255,0.04)',
+                                                                opacity: onMap ? 0.5 : 1,
+                                                            }}>
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={checked}
+                                                                    disabled={onMap}
+                                                                    onChange={e => {
+                                                                        const next = new Set(selectedInfra)
+                                                                        if (e.target.checked) next.add(item.id)
+                                                                        else next.delete(item.id)
+                                                                        setSelectedInfra(next)
+                                                                    }}
+                                                                    style={{ cursor: onMap ? 'default' : 'pointer', flexShrink: 0 }}
+                                                                />
+                                                                <div style={{ width: 24, height: 24, borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center', background: `${item.color}18`, flexShrink: 0 }}>
+                                                                    <i className={`fa-solid ${item.icon}`} style={{ color: item.color, fontSize: 11 }} />
+                                                                </div>
+                                                                <div style={{ flex: 1, minWidth: 0 }}>
+                                                                    <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                                        {item.label}
+                                                                    </div>
+                                                                    {item.ip && <div style={{ fontSize: 10, color: 'var(--muted)', fontFamily: 'JetBrains Mono, monospace' }}>{item.ip}</div>}
+                                                                </div>
+                                                                {onMap ? (
+                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+                                                                        <span style={{ fontSize: 9, color: 'var(--muted)' }}>en mapa</span>
+                                                                        <button
+                                                                            onClick={() => handleRemoveFromInfra(item)}
+                                                                            title="Quitar del mapa"
+                                                                            style={{
+                                                                                background: 'rgba(252,129,129,0.12)', border: '1px solid rgba(252,129,129,0.3)',
+                                                                                borderRadius: 4, color: '#fc8181', cursor: 'pointer',
+                                                                                padding: '1px 5px', fontSize: 9, lineHeight: 1.6,
+                                                                            }}
+                                                                        >
+                                                                            <i className="fa-solid fa-xmark" />
+                                                                        </button>
+                                                                    </div>
+                                                                ) : item.badge && (
+                                                                    <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 6px', borderRadius: 4, flexShrink: 0, background: `${item.color}18`, color: item.color, border: `1px solid ${item.color}33` }}>
+                                                                        {item.badge}
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        )
+                                                    })}
+                                                </div>
+                                            ))}
+                                        </div>
+
+                                        {/* Add button */}
+                                        <button
+                                            className="btn btn-primary"
+                                            style={{ width: '100%', justifyContent: 'center', flexShrink: 0 }}
+                                            onClick={handleAddFromInfra}
+                                            disabled={selCount === 0}
+                                        >
+                                            <i className="fa-solid fa-plus" />
+                                            {selCount > 0 ? `Añadir ${selCount} seleccionado${selCount > 1 ? 's' : ''}` : 'Selecciona recursos'}
+                                        </button>
+                                    </>
+                                )}
+                            </div>
+                        </Panel>
+                    )
+                })()}
 
                 {/* ── Add node panel — grouped icon picker ── */}
                 {editMode && showAddNode && !editingNodeId && (
@@ -605,7 +1191,7 @@ export default function Network({ onToast }: Props) {
                             color: 'var(--muted)', fontSize: 13, textAlign: 'center',
                         }}>
                             <i className="fa-solid fa-layer-group" style={{ marginRight: 8, color: 'var(--accent5)' }} />
-                            Carga el template <strong style={{ color: 'var(--text)' }}>MXHOME</strong> o activa{' '}
+                            Carga un <strong style={{ color: 'var(--text)' }}>template</strong> o activa{' '}
                             <strong style={{ color: 'var(--text)' }}>modo Edición</strong> para construir tu topología
                         </div>
                     </Panel>

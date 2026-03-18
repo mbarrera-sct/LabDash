@@ -4,7 +4,10 @@
       "Bash(docker compose:*)",
       "Bash(cmd.exe /c \"cd c:\\\\Users\\\\MigueliX\\\\Documents\\\\GitHub\\\\LabDash\\\\frontend && npm install\")",
       "Bash(cmd.exe /c \"cd /d c:\\\\Users\\\\MigueliX\\\\Documents\\\\GitHub\\\\LabDash\\\\frontend && npm install 2>&1\")",
-      "Bash(powershell.exe -Command \"Get-Command node,npm -ErrorAction SilentlyContinue | Select-Object Name,Source\")"
+      "Bash(powershell.exe -Command \"Get-Command node,npm -ErrorAction SilentlyContinue | Select-Object Name,Source\")",
+      "Bash(python -c \"from PIL import Image, ImageDraw; print\\(''ok''\\)\")",
+      "Bash(py -3 -c \"from PIL import Image, ImageDraw; print\\(''ok''\\)\")",
+      "Bash(where node:*)"
     ]
   }
 }

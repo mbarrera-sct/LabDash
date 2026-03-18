@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker run:*)",
+      "Bash(curl -s http://localhost:8090/healthz)",
+      "Bash(docker stop:*)",
+      "Bash(docker start:*)",
+      "Bash(docker rm:*)",
+      "Bash(docker images:*)",
+      "Bash(npm run:*)",
+      "Bash(grep -rn \"setInterval\\\\|5000\\\\|10000\\\\|30000\\\\|60000\" /c/Users/MigueliX/Documents/GitHub/LabDash/frontend/src --include=*.tsx --include=*.ts)"
+    ]
+  }
+}

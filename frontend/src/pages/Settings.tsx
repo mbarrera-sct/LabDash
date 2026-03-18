@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
-import { api, authApi, usersApi, alertsApi, type CurrentUser, type AlertRule } from '../api'
+import { api, authApi, usersApi, type CurrentUser } from '../api'
+import React from 'react'
 
 interface Props {
     onToast: (t: 'success' | 'error', m: string) => void
     currentUser: CurrentUser | null
     onUserUpdate: () => void
+    onShowWizard?: () => void
 }
 
 const SECTIONS = [
@@ -68,11 +70,37 @@ const SECTIONS = [
             { key: 'snmp_port',      label: 'Puerto UDP (default: 161)',             type: 'text' },
         ]
     },
+    {
+        id: 'portainer', title: 'Portainer', icon: 'fa-cube', color: '#63b3ed',
+        fields: [
+            { key: 'portainer_url',   label: 'URL (ej. http://192.168.1.x:9000)', type: 'text' },
+            { key: 'portainer_token', label: 'API Key (Settings → Users → Access tokens)', type: 'password' },
+        ]
+    },
+    {
+        id: 'uptime_kuma', title: 'Uptime Kuma', icon: 'fa-heart-pulse', color: '#68d391',
+        fields: [
+            { key: 'uptime_kuma_url',  label: 'URL (ej. http://192.168.1.x:3001)', type: 'text' },
+            { key: 'uptime_kuma_slug', label: 'Status page slug (default: default)',  type: 'text' },
+        ]
+    },
+    {
+        id: 'tailscale', title: 'Tailscale', icon: 'fa-shield-halved', color: '#63b3ed',
+        fields: [
+            { key: 'tailscale_tailnet', label: 'Tailnet (ej. mi-empresa.com o nombre@gmail.com)', type: 'text' },
+            { key: 'tailscale_token',   label: 'API Token (generado en tailscale.com/admin/settings/keys)', type: 'password' },
+        ]
+    },
+    {
+        id: 'snmp_trap', title: 'SNMP Trap Receiver', icon: 'fa-tower-cell', color: '#fbd38d',
+        fields: [
+            { key: 'snmp_trap_port', label: 'Puerto UDP para traps (default: 1620, requiere 162 con root)', type: 'text' },
+        ]
+    },
 ]
 
-const OP_LABELS: Record<string, string> = { gt: '>', lt: '<', gte: '≥', lte: '≤', eq: '=', ne: '≠' }
 
-export default function Settings({ onToast, currentUser, onUserUpdate }: Props) {
+export default function Settings({ onToast, currentUser, onUserUpdate, onShowWizard }: Props) {
     // ── Integration settings ───────────────────────────────────
     const [values, setValues] = useState<Record<string, string>>({})
     const [saving, setSaving] = useState(false)
@@ -90,24 +118,41 @@ export default function Settings({ onToast, currentUser, onUserUpdate }: Props) 
     const [totpCode,    setTotpCode]    = useState('')
 
     // ── Users ─────────────────────────────────────────────────
-    const [users,       setUsers]       = useState<{ id: number; username: string; totp_enabled: boolean }[]>([])
+    const [users,       setUsers]       = useState<{ id: number; username: string; totp_enabled: boolean; role: string }[]>([])
     const [newUsername, setNewUsername] = useState('')
     const [newPassword, setNewPassword] = useState('')
+    const [newUserRole, setNewUserRole] = useState<'admin' | 'readonly'>('admin')
     const [userLoading, setUserLoading] = useState(false)
 
-    // ── Alert rules ────────────────────────────────────────────
-    const [rules,         setRules]         = useState<AlertRule[]>([])
-    const [ruleLoading,   setRuleLoading]   = useState(false)
-    const [newRule, setNewRule] = useState({ name: '', metric_key: '', operator: 'gt', threshold: 0, notify_url: '', cooldown_s: 3600 })
+    // ── Backup / Restore ──────────────────────────────────────
+    const [restoring, setRestoring] = useState(false)
+
+    // ── Push notifications ─────────────────────────────────────
+    const [pushSupported, setPushSupported] = useState(false)
+    const [pushSubscribed, setPushSubscribed] = useState(false)
+    const [pushLoading, setPushLoading] = useState(false)
+
+    // ── Audit log, sessions ────────────────────────────────────
+    const [auditLog,      setAuditLog]      = useState<any[]>([])
+    const [sessions,      setSessions]      = useState<{ token_hint: string; expires_at: number; token: string }[]>([])
 
     useEffect(() => {
         api.getSettings().then((s: any) => setValues(s as Record<string, string>)).catch(() => { })
         loadUsers()
-        loadRules()
+        api.getAuditLog(50).then(r => setAuditLog(r.entries ?? [])).catch(() => {})
+        api.getSessions().then(r => setSessions(r.sessions ?? [])).catch(() => {})
+        // Check push notification support
+        if ('serviceWorker' in navigator && 'PushManager' in window) {
+            setPushSupported(true)
+            navigator.serviceWorker.register('/sw.js').then(reg => {
+                reg.pushManager.getSubscription().then(sub => {
+                    setPushSubscribed(!!sub)
+                }).catch(() => {})
+            }).catch(() => {})
+        }
     }, [])
 
     const loadUsers = () => usersApi.list().then(r => setUsers(r.users)).catch(() => { })
-    const loadRules = () => alertsApi.list().then(r => setRules(r.rules)).catch(() => { })
 
     const set = (k: string, v: string) => setValues(prev => ({ ...prev, [k]: v }))
 
@@ -181,12 +226,23 @@ export default function Settings({ onToast, currentUser, onUserUpdate }: Props) 
         if (!newUsername.trim() || !newPassword) { onToast('error', 'Usuario y contraseña son obligatorios'); return }
         setUserLoading(true)
         try {
-            await usersApi.create(newUsername.trim(), newPassword)
-            onToast('success', `✓ Usuario "${newUsername.trim()}" creado`)
-            setNewUsername(''); setNewPassword('')
+            await usersApi.create(newUsername.trim(), newPassword, newUserRole)
+            onToast('success', `✓ Usuario "${newUsername.trim()}" creado como ${newUserRole === 'readonly' ? 'solo lectura' : 'administrador'}`)
+            setNewUsername(''); setNewPassword(''); setNewUserRole('admin')
             loadUsers()
         } catch (err: any) { onToast('error', err.message || 'Error al crear usuario') }
         finally { setUserLoading(false) }
+    }
+
+    const handleToggleRole = async (userId: number, currentRole: string) => {
+        const newRole = currentRole === 'readonly' ? 'admin' : 'readonly'
+        const label = newRole === 'readonly' ? 'solo lectura' : 'administrador'
+        if (!confirm(`¿Cambiar rol a "${label}"?`)) return
+        try {
+            await usersApi.setRole(userId, newRole)
+            onToast('success', `✓ Rol cambiado a ${label}`)
+            loadUsers()
+        } catch (err: any) { onToast('error', err.message || 'Error al cambiar rol') }
     }
 
     const handleDeleteUser = async (userId: number, username: string) => {
@@ -198,33 +254,86 @@ export default function Settings({ onToast, currentUser, onUserUpdate }: Props) 
         } catch (err: any) { onToast('error', err.message || 'Error al eliminar usuario') }
     }
 
-    const handleCreateRule = async (e: React.FormEvent) => {
-        e.preventDefault()
-        if (!newRule.name || !newRule.metric_key) { onToast('error', 'Nombre y métrica son obligatorios'); return }
-        setRuleLoading(true)
-        try {
-            await alertsApi.create(newRule)
-            onToast('success', '✓ Regla de alerta creada')
-            setNewRule({ name: '', metric_key: '', operator: 'gt', threshold: 0, notify_url: '', cooldown_s: 3600 })
-            loadRules()
-        } catch (err: any) { onToast('error', err.message || 'Error al crear regla') }
-        finally { setRuleLoading(false) }
+    const handleBackup = () => {
+        const t = localStorage.getItem('labdash_token') ?? ''
+        const a = document.createElement('a')
+        a.href = '/api/backup'
+        // attach token via a hidden fetch → blob → link
+        fetch('/api/backup', { headers: { Authorization: `Bearer ${t}` } })
+            .then(r => r.blob())
+            .then(blob => {
+                const cd = undefined // filename comes from Content-Disposition
+                void cd
+                const url = URL.createObjectURL(blob)
+                a.href = url
+                a.download = `labdash-backup-${new Date().toISOString().slice(0, 10)}.json`
+                a.click()
+                URL.revokeObjectURL(url)
+            })
+            .catch(() => onToast('error', 'Error al descargar el backup'))
     }
 
-    const handleDeleteRule = async (id: number) => {
-        if (!confirm('¿Eliminar esta regla de alerta?')) return
+    const handleRestore = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0]
+        if (!file) return
+        e.target.value = ''
+        if (!confirm(`¿Restaurar configuración desde "${file.name}"?\nEsto sobreescribirá los ajustes actuales. El diagrama y las reglas de alerta se fusionarán.`)) return
+        setRestoring(true)
         try {
-            await alertsApi.delete(id)
-            onToast('success', 'Regla eliminada')
-            loadRules()
-        } catch (err: any) { onToast('error', err.message) }
+            const text = await file.text()
+            const payload = JSON.parse(text)
+            const r = await api.restore(payload)
+            onToast('success', `✓ Restaurado: ${r.restored.join(', ') || 'nada nuevo'}`)
+            // Reload settings
+            api.getSettings().then((s: any) => setValues(s as Record<string, string>)).catch(() => {})
+        } catch (err: any) {
+            onToast('error', err.message || 'Error al restaurar — verifica que el archivo es válido')
+        } finally { setRestoring(false) }
     }
 
-    const handleToggleRule = async (rule: AlertRule) => {
+    const handlePushToggle = async () => {
+        setPushLoading(true)
         try {
-            await alertsApi.toggle(rule.id, !rule.enabled)
-            loadRules()
-        } catch { }
+            const reg = await navigator.serviceWorker.ready
+            if (pushSubscribed) {
+                const sub = await reg.pushManager.getSubscription()
+                if (sub) {
+                    const endpoint = sub.endpoint
+                    await sub.unsubscribe()
+                    await api.pushUnsubscribe(endpoint)
+                }
+                setPushSubscribed(false)
+                onToast('success', 'Notificaciones desactivadas')
+            } else {
+                // Get VAPID key from backend
+                const { key } = await api.pushVapidKey()
+                if (!key) { onToast('error', 'VAPID key no disponible — recarga y vuelve a intentarlo'); return }
+                // Convert URL-safe base64 to Uint8Array
+                const raw = atob(key.replace(/-/g, '+').replace(/_/g, '/'))
+                const appKey = new Uint8Array(raw.length)
+                for (let i = 0; i < raw.length; i++) appKey[i] = raw.charCodeAt(i)
+                const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: appKey })
+                const json = sub.toJSON()
+                await api.pushSubscribe({
+                    endpoint: json.endpoint!,
+                    p256dh:   (json.keys as any).p256dh,
+                    auth:     (json.keys as any).auth,
+                })
+                setPushSubscribed(true)
+                onToast('success', '✓ Notificaciones push activadas')
+            }
+        } catch (err: any) {
+            onToast('error', err.message || 'Error al gestionar notificaciones push')
+        } finally { setPushLoading(false) }
+    }
+
+    const handleRevokeSession = async (token: string) => {
+        if (!confirm('¿Revocar esta sesión?')) return
+        try {
+            await api.revokeSession(token)
+            onToast('success', 'Sesión revocada')
+            api.getSessions().then(r => setSessions(r.sessions ?? [])).catch(() => {})
+        } catch (err: any) { onToast('error', err.message || 'Error al revocar sesión') }
     }
 
     const qrUrl = totpSetup ? `/api/auth/totp-qr?uri=${encodeURIComponent(totpSetup.uri)}` : ''
@@ -319,98 +428,70 @@ DB_PATH=/data/labdash.db`}
                 </pre>
             </div>
 
-            {/* ── Alert rules ── */}
-            <div className="form-section" style={{ marginTop: 40 }}>
-                <div className="form-section-title" style={{ color: '#fc8181' }}>
-                    <i className="fa-solid fa-bell" /> Reglas de alerta
-                </div>
-                <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 16 }}>
-                    Define umbrales sobre métricas recogidas (ej. <code>pve.cpu.pve</code>, <code>gw.rtt.WAN_DHCP</code>, <code>snmp.in_kbps</code>).
-                    Cuando se supera el umbral se genera un evento y se envía un webhook (compatible con Slack, Discord, etc.)
-                </p>
-
-                {/* Rule list */}
-                {rules.length > 0 && (
-                    <div style={{ marginBottom: 20 }}>
-                        {rules.map(rule => (
-                            <div key={rule.id} style={{
-                                display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px',
-                                background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 10, marginBottom: 8,
-                                opacity: rule.enabled ? 1 : 0.5,
-                            }}>
-                                <i className="fa-solid fa-bell" style={{ color: '#fc8181', fontSize: 13 }} />
-                                <div style={{ flex: 1, minWidth: 0 }}>
-                                    <div style={{ fontSize: 13, fontWeight: 600 }}>{rule.name}</div>
-                                    <div style={{ fontSize: 11, color: 'var(--muted)', fontFamily: 'JetBrains Mono, monospace' }}>
-                                        {rule.metric_key} {OP_LABELS[rule.operator] ?? rule.operator} {rule.threshold}
-                                        {rule.notify_url && <span style={{ marginLeft: 8, color: 'var(--accent6)' }}>· webhook</span>}
-                                        {rule.last_fired ? <span style={{ marginLeft: 8 }}>· última vez {new Date(rule.last_fired * 1000).toLocaleString('es-ES')}</span> : ''}
-                                    </div>
-                                </div>
-                                <button
-                                    onClick={() => handleToggleRule(rule)}
-                                    style={{
-                                        background: 'none', border: `1px solid ${rule.enabled ? 'rgba(104,211,145,0.3)' : 'rgba(150,150,150,0.3)'}`,
-                                        borderRadius: 6, color: rule.enabled ? '#68d391' : 'var(--muted)',
-                                        cursor: 'pointer', padding: '3px 10px', fontSize: 11,
-                                    }}
-                                    title={rule.enabled ? 'Deshabilitar' : 'Habilitar'}
-                                >
-                                    <i className={`fa-solid ${rule.enabled ? 'fa-toggle-on' : 'fa-toggle-off'}`} />
-                                </button>
-                                <button
-                                    onClick={() => handleDeleteRule(rule.id)}
-                                    style={{ background: 'none', border: '1px solid rgba(252,129,129,0.3)', borderRadius: 6, color: '#fc8181', cursor: 'pointer', padding: '3px 8px', fontSize: 11 }}
-                                >
-                                    <i className="fa-solid fa-trash" />
-                                </button>
-                            </div>
-                        ))}
-                    </div>
-                )}
-
-                {/* New rule form */}
-                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', marginBottom: 12 }}>
-                    <i className="fa-solid fa-plus" style={{ color: 'var(--muted)', marginRight: 6 }} />
-                    Nueva regla
-                </div>
-                <form onSubmit={handleCreateRule}>
-                    <div className="form-grid">
-                        <div className="form-group">
-                            <label>Nombre</label>
-                            <input value={newRule.name} onChange={e => setNewRule(r => ({ ...r, name: e.target.value }))} placeholder="CPU alta en pve" autoComplete="off" />
+            {/* ── Setup wizard ── */}
+            {onShowWizard && (
+                <div style={{ marginTop: 24, padding: '16px 20px', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+                    <div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', marginBottom: 3 }}>
+                            <i className="fa-solid fa-wand-magic-sparkles" style={{ color: 'var(--accent5)', marginRight: 8 }} />
+                            Asistente de configuración
                         </div>
-                        <div className="form-group">
-                            <label>Clave de métrica</label>
-                            <input value={newRule.metric_key} onChange={e => setNewRule(r => ({ ...r, metric_key: e.target.value }))} placeholder="pve.cpu.pve" autoComplete="off" />
-                        </div>
-                        <div className="form-group">
-                            <label>Operador</label>
-                            <select value={newRule.operator} onChange={e => setNewRule(r => ({ ...r, operator: e.target.value }))}
-                                style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--text)', padding: '8px 12px', fontSize: 13, width: '100%' }}>
-                                {Object.entries(OP_LABELS).map(([op, label]) => (
-                                    <option key={op} value={op}>{label} ({op})</option>
-                                ))}
-                            </select>
-                        </div>
-                        <div className="form-group">
-                            <label>Umbral</label>
-                            <input type="number" step="any" value={newRule.threshold} onChange={e => setNewRule(r => ({ ...r, threshold: parseFloat(e.target.value) || 0 }))} />
-                        </div>
-                        <div className="form-group">
-                            <label>Webhook URL (opcional — Slack/Discord/etc.)</label>
-                            <input value={newRule.notify_url} onChange={e => setNewRule(r => ({ ...r, notify_url: e.target.value }))} placeholder="https://hooks.slack.com/..." type="url" autoComplete="off" />
-                        </div>
-                        <div className="form-group">
-                            <label>Cooldown (segundos, mín. tiempo entre alertas)</label>
-                            <input type="number" min="60" value={newRule.cooldown_s} onChange={e => setNewRule(r => ({ ...r, cooldown_s: parseInt(e.target.value) || 3600 }))} />
+                        <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                            Vuelve a abrir el asistente paso a paso para configurar integraciones.
                         </div>
                     </div>
-                    <button className="btn btn-primary" type="submit" disabled={ruleLoading} style={{ marginTop: 8 }}>
-                        <i className={`fa-solid ${ruleLoading ? 'fa-spinner fa-spin' : 'fa-bell-plus'}`} />
-                        {ruleLoading ? 'Creando…' : 'Crear regla'}
+                    <button
+                        className="btn btn-secondary"
+                        onClick={onShowWizard}
+                        style={{ flexShrink: 0, border: '1px solid rgba(183,148,246,0.35)', color: 'var(--accent5)', background: 'rgba(183,148,246,0.08)' }}
+                    >
+                        <i className="fa-solid fa-play" /> Abrir asistente
                     </button>
-                </form>
+                </div>
+            )}
+
+            {/* ── Backup / Restore ── */}
+            <div className="form-section" style={{ marginTop: 40 }}>
+                <div className="form-section-title" style={{ color: 'var(--accent6)' }}>
+                    <i className="fa-solid fa-box-archive" /> Backup y restauración
+                </div>
+                <div style={{
+                    fontSize: 12, color: 'var(--muted)', marginBottom: 16, padding: '8px 12px',
+                    background: 'rgba(252,129,129,0.06)', border: '1px solid rgba(252,129,129,0.2)',
+                    borderRadius: 8, lineHeight: 1.7,
+                }}>
+                    <i className="fa-solid fa-triangle-exclamation" style={{ color: '#fc8181', marginRight: 6 }} />
+                    El backup contiene <strong style={{ color: 'var(--text)' }}>credenciales en texto plano</strong>.
+                    Guárdalo en un lugar seguro y no lo compartas.
+                </div>
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <button
+                        className="btn btn-primary"
+                        onClick={handleBackup}
+                        style={{ border: '1px solid rgba(129,230,217,0.35)', color: 'var(--accent6)', background: 'rgba(129,230,217,0.08)' }}
+                    >
+                        <i className="fa-solid fa-download" /> Descargar backup (.json)
+                    </button>
+                    <label style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 8,
+                        padding: '8px 16px', borderRadius: 8, fontSize: 13, fontWeight: 500,
+                        cursor: restoring ? 'not-allowed' : 'pointer', opacity: restoring ? 0.5 : 1,
+                        border: '1px solid rgba(251,211,141,0.35)', color: 'var(--accent4)',
+                        background: 'rgba(251,211,141,0.08)', transition: 'all .15s',
+                    }}>
+                        <i className={`fa-solid ${restoring ? 'fa-spinner fa-spin' : 'fa-upload'}`} />
+                        {restoring ? 'Restaurando…' : 'Importar backup'}
+                        <input
+                            type="file" accept=".json" style={{ display: 'none' }}
+                            disabled={restoring}
+                            onChange={handleRestore}
+                        />
+                    </label>
+                </div>
+                <p style={{ fontSize: 11, color: 'var(--muted)', marginTop: 12, lineHeight: 1.6 }}>
+                    El backup incluye: todos los ajustes, diagrama de red y reglas de alerta.
+                    Al restaurar, los ajustes se sobreescriben y las reglas se fusionan (no duplica).
+                </p>
             </div>
 
             {/* ── Security ── */}
@@ -518,6 +599,43 @@ DB_PATH=/data/labdash.db`}
                 </div>
             </div>
 
+            {/* ── Push notifications ── */}
+            {pushSupported && (
+                <div className="form-section" style={{ marginTop: 24 }}>
+                    <div className="form-section-title" style={{ color: '#b794f4' }}>
+                        <i className="fa-solid fa-bell-ring" /> Notificaciones push del navegador
+                    </div>
+                    <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 14, lineHeight: 1.7 }}>
+                        Recibe notificaciones del navegador cuando se dispare una alerta, incluso si la pestaña está en segundo plano.
+                        Las notificaciones se envían a través de tu navegador — no requieren app móvil.
+                    </p>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                        <button
+                            onClick={handlePushToggle}
+                            disabled={pushLoading}
+                            style={{
+                                border: `1px solid ${pushSubscribed ? 'rgba(252,129,129,0.4)' : 'rgba(183,148,244,0.4)'}`,
+                                background: pushSubscribed ? 'rgba(252,129,129,0.08)' : 'rgba(183,148,244,0.08)',
+                                color: pushSubscribed ? '#fc8181' : '#b794f4',
+                                borderRadius: 8, padding: '8px 16px', cursor: 'pointer',
+                                fontSize: 13, display: 'flex', alignItems: 'center', gap: 8,
+                            }}
+                        >
+                            <i className={`fa-solid ${pushLoading ? 'fa-spinner fa-spin' : pushSubscribed ? 'fa-bell-slash' : 'fa-bell'}`} />
+                            {pushLoading ? 'Procesando…' : pushSubscribed ? 'Desactivar notificaciones' : 'Activar notificaciones'}
+                        </button>
+                        {pushSubscribed && (
+                            <span style={{ fontSize: 12, color: '#68d391', display: 'flex', alignItems: 'center', gap: 5 }}>
+                                <i className="fa-solid fa-circle-check" /> Activas en este navegador
+                            </span>
+                        )}
+                    </div>
+                    <p style={{ fontSize: 11, color: 'var(--muted)', marginTop: 10, lineHeight: 1.6 }}>
+                        Las notificaciones son por navegador y dispositivo. Actívalas en cada dispositivo donde quieras recibirlas.
+                    </p>
+                </div>
+            )}
+
             {/* ── Users ── */}
             <div className="form-section" style={{ marginTop: 24 }}>
                 <div className="form-section-title" style={{ color: 'var(--accent2)' }}>
@@ -528,28 +646,49 @@ DB_PATH=/data/labdash.db`}
                         <p style={{ color: 'var(--muted)', fontSize: 13 }}>Cargando usuarios…</p>
                     ) : (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                            {users.map(u => (
-                                <div key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 16px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 10 }}>
-                                    <i className="fa-solid fa-user" style={{ color: 'var(--muted)', fontSize: 14 }} />
-                                    <span style={{ flex: 1, fontSize: 14, fontWeight: u.id === currentUser?.id ? 600 : 400 }}>
-                                        {u.username}
-                                        {u.id === currentUser?.id && <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 8 }}>(tú)</span>}
-                                    </span>
-                                    {u.totp_enabled ? (
-                                        <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 20, background: 'rgba(104,211,145,0.12)', border: '1px solid rgba(104,211,145,0.3)', color: '#68d391', display: 'flex', alignItems: 'center', gap: 4 }}>
-                                            <i className="fa-solid fa-shield-halved" style={{ fontSize: 10 }} />2FA
+                            {users.map(u => {
+                                const isReadonly = (u.role || 'admin') === 'readonly'
+                                const isMe = u.id === currentUser?.id
+                                const isAdmin = (currentUser?.role || 'admin') === 'admin'
+                                return (
+                                    <div key={u.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 16px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 10 }}>
+                                        <i className={`fa-solid ${isReadonly ? 'fa-user-clock' : 'fa-user-shield'}`} style={{ color: isReadonly ? '#fbd38d' : 'var(--accent)', fontSize: 14 }} />
+                                        <span style={{ flex: 1, fontSize: 14, fontWeight: isMe ? 600 : 400 }}>
+                                            {u.username}
+                                            {isMe && <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 8 }}>(tú)</span>}
                                         </span>
-                                    ) : (
-                                        <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 20, background: 'rgba(150,150,150,0.1)', border: '1px solid rgba(150,150,150,0.2)', color: 'var(--muted)' }}>Sin 2FA</span>
-                                    )}
-                                    {u.id !== currentUser?.id && (
-                                        <button onClick={() => handleDeleteUser(u.id, u.username)}
-                                            style={{ background: 'none', border: '1px solid rgba(252,129,129,0.3)', borderRadius: 6, color: '#fc8181', cursor: 'pointer', padding: '4px 10px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 5 }}>
-                                            <i className="fa-solid fa-trash" />
-                                        </button>
-                                    )}
-                                </div>
-                            ))}
+                                        {/* Role badge */}
+                                        <span style={{
+                                            fontSize: 10, padding: '2px 8px', borderRadius: 20, fontWeight: 700,
+                                            background: isReadonly ? 'rgba(251,211,141,0.12)' : 'rgba(99,179,237,0.12)',
+                                            border: `1px solid ${isReadonly ? 'rgba(251,211,141,0.3)' : 'rgba(99,179,237,0.3)'}`,
+                                            color: isReadonly ? '#fbd38d' : '#63b3ed',
+                                        }}>
+                                            {isReadonly ? 'Solo lectura' : 'Admin'}
+                                        </span>
+                                        {u.totp_enabled ? (
+                                            <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 20, background: 'rgba(104,211,145,0.12)', border: '1px solid rgba(104,211,145,0.3)', color: '#68d391', display: 'flex', alignItems: 'center', gap: 4 }}>
+                                                <i className="fa-solid fa-shield-halved" style={{ fontSize: 10 }} />2FA
+                                            </span>
+                                        ) : (
+                                            <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 20, background: 'rgba(150,150,150,0.1)', border: '1px solid rgba(150,150,150,0.2)', color: 'var(--muted)' }}>Sin 2FA</span>
+                                        )}
+                                        {!isMe && isAdmin && (
+                                            <button onClick={() => handleToggleRole(u.id, u.role || 'admin')}
+                                                title={isReadonly ? 'Promover a admin' : 'Cambiar a solo lectura'}
+                                                style={{ background: 'none', border: `1px solid ${isReadonly ? 'rgba(99,179,237,0.3)' : 'rgba(251,211,141,0.3)'}`, borderRadius: 6, color: isReadonly ? '#63b3ed' : '#fbd38d', cursor: 'pointer', padding: '4px 10px', fontSize: 12 }}>
+                                                <i className={`fa-solid ${isReadonly ? 'fa-arrow-up' : 'fa-arrow-down'}`} />
+                                            </button>
+                                        )}
+                                        {!isMe && isAdmin && (
+                                            <button onClick={() => handleDeleteUser(u.id, u.username)}
+                                                style={{ background: 'none', border: '1px solid rgba(252,129,129,0.3)', borderRadius: 6, color: '#fc8181', cursor: 'pointer', padding: '4px 10px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 5 }}>
+                                                <i className="fa-solid fa-trash" />
+                                            </button>
+                                        )}
+                                    </div>
+                                )
+                            })}
                         </div>
                     )}
                 </div>
@@ -566,6 +705,14 @@ DB_PATH=/data/labdash.db`}
                             <label>Contraseña</label>
                             <input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} autoComplete="new-password" />
                         </div>
+                        <div className="form-group">
+                            <label>Rol</label>
+                            <select value={newUserRole} onChange={e => setNewUserRole(e.target.value as 'admin' | 'readonly')}
+                                style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--text)', padding: '8px 12px', fontSize: 13, width: '100%' }}>
+                                <option value="admin">Administrador — acceso total</option>
+                                <option value="readonly">Solo lectura — no puede modificar</option>
+                            </select>
+                        </div>
                     </div>
                     <button className="btn btn-primary" type="submit" disabled={userLoading} style={{ marginTop: 8 }}>
                         <i className={`fa-solid ${userLoading ? 'fa-spinner fa-spin' : 'fa-user-plus'}`} />
@@ -573,6 +720,60 @@ DB_PATH=/data/labdash.db`}
                     </button>
                 </form>
             </div>
+
+            {/* ── Active sessions ── */}
+            <div className="form-section" style={{ marginTop: 24 }}>
+                <div className="form-section-title" style={{ color: 'var(--accent)' }}>
+                    <i className="fa-solid fa-key" /> Sesiones activas
+                </div>
+                {sessions.length === 0 ? (
+                    <p style={{ color: 'var(--muted)', fontSize: 13 }}>No hay sesiones activas.</p>
+                ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {sessions.map((s, i) => (
+                            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 16px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 10 }}>
+                                <i className="fa-solid fa-shield-check" style={{ color: 'var(--accent)', fontSize: 14 }} />
+                                <div style={{ flex: 1 }}>
+                                    <div style={{ fontSize: 12, fontFamily: 'JetBrains Mono, monospace', color: 'var(--text)' }}>{s.token_hint}</div>
+                                    <div style={{ fontSize: 11, color: 'var(--muted)' }}>
+                                        Expira: {new Date(s.expires_at * 1000).toLocaleString('es-ES')}
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={() => handleRevokeSession(s.token)}
+                                    style={{ background: 'none', border: '1px solid rgba(252,129,129,0.3)', borderRadius: 6, color: '#fc8181', cursor: 'pointer', padding: '4px 10px', fontSize: 12 }}
+                                >
+                                    <i className="fa-solid fa-ban" /> Revocar
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+
+            {/* ── Audit log ── */}
+            <div className="form-section" style={{ marginTop: 24 }}>
+                <div className="form-section-title" style={{ color: 'var(--accent4)' }}>
+                    <i className="fa-solid fa-scroll" /> Log de auditoría
+                </div>
+                {auditLog.length === 0 ? (
+                    <p style={{ color: 'var(--muted)', fontSize: 13 }}>Sin entradas de auditoría.</p>
+                ) : (
+                    <div style={{ maxHeight: 280, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        {auditLog.map((e: any) => (
+                            <div key={e.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '6px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8 }}>
+                                <span style={{ fontSize: 10, color: 'var(--muted)', fontFamily: 'JetBrains Mono, monospace', minWidth: 70, marginTop: 1 }}>
+                                    {new Date(e.ts * 1000).toLocaleTimeString('es-ES')}
+                                </span>
+                                <span style={{ fontSize: 12, color: 'var(--accent)', minWidth: 80 }}>{e.username}</span>
+                                <span style={{ fontSize: 12, color: 'var(--text)', minWidth: 80 }}>{e.action}</span>
+                                <span style={{ fontSize: 11, color: 'var(--muted)', flex: 1, wordBreak: 'break-all' }}>{e.detail}</span>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+
         </div>
     )
 }

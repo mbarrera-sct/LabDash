@@ -1,0 +1,375 @@
+---
+# LabDash — PostgreSQL deployment for k3s
+# Uses DATABASE_URL env var to switch from SQLite to asyncpg backend.
+# Deploy order: apply this file, wait for postgres pod to be Ready, then labdash will start.
+#
+#   kubectl apply -f k3s/deployment-postgres.yaml
+#
+# ─── Namespace ───────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: labdash
+
+---
+# ─── Secret (credentials) ────────────────────────────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: labdash-secrets
+  namespace: labdash
+type: Opaque
+stringData:
+  # ── Database ──
+  DATABASE_URL:          "postgresql://labdash:changeme@postgres:5432/labdash"
+  # ── Proxmox ──
+  PVE_URL:               "https://192.168.1.7:8006"
+  PVE_USER:              "root@pam"
+  PVE_PASS:              ""
+  # ── OPNsense ──
+  OPN_URL:               "https://192.168.1.1"
+  OPN_KEY:               ""
+  OPN_SECRET:            ""
+  # ── Kubernetes / k3s ──
+  K8S_URL:               ""
+  K8S_TOKEN:             ""
+  # ── Unraid ──
+  UNRAID_URL:            ""
+  UNRAID_KEY:            ""
+  # ── Plex ──
+  PLEX_URL:              ""
+  PLEX_TOKEN:            ""
+  # ── Immich ──
+  IMMICH_URL:            ""
+  IMMICH_KEY:            ""
+  # ── Home Assistant ──
+  HA_URL:                ""
+  HA_TOKEN:              ""
+  HA_ENTITIES:           ""
+  # ── Portainer ──
+  PORTAINER_URL:         ""
+  PORTAINER_TOKEN:       ""
+  # ── Uptime Kuma ──
+  UPTIME_KUMA_URL:       ""
+  UPTIME_KUMA_SLUG:      ""
+  # ── Tailscale ──
+  TAILSCALE_TAILNET:     ""
+  TAILSCALE_TOKEN:       ""
+  # ── Initial admin (first boot only) ──
+  LABDASH_USER:          "admin"
+  LABDASH_PASS:          "changeme"
+
+---
+# ─── Secret: PostgreSQL password ─────────────────────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: labdash
+type: Opaque
+stringData:
+  POSTGRES_USER:     "labdash"
+  POSTGRES_PASSWORD: "changeme"   # ← change before deploying
+  POSTGRES_DB:       "labdash"
+
+---
+# ─── PVC: PostgreSQL data ─────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: labdash
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+  # storageClassName: longhorn   # set your storage class
+
+---
+# ─── PostgreSQL StatefulSet ───────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: labdash
+  labels:
+    app: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: postgres-secret
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "labdash"]
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "labdash"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 512Mi
+              cpu: 500m
+          volumes: []
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-data
+
+---
+# ─── PostgreSQL Service ───────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: labdash
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+  type: ClusterIP
+
+---
+# ─── ServiceAccount + RBAC ───────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: labdash
+  namespace: labdash
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: labdash-reader
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods", "namespaces", "services"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets", "statefulsets"]
+    verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: labdash-reader
+subjects:
+  - kind: ServiceAccount
+    name: labdash
+    namespace: labdash
+roleRef:
+  kind: ClusterRole
+  name: labdash-reader
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ─── LabDash Deployment ───────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: labdash
+  namespace: labdash
+  labels:
+    app: labdash
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: labdash
+  template:
+    metadata:
+      labels:
+        app: labdash
+    spec:
+      serviceAccountName: labdash
+      # Wait for PostgreSQL to be accepting connections before starting LabDash
+      initContainers:
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z postgres 5432; do
+                echo "Waiting for PostgreSQL..."; sleep 2
+              done
+              echo "PostgreSQL is up"
+      containers:
+        - name: labdash
+          image: miguelix/labdash:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: snmp-trap
+              containerPort: 1620
+              protocol: UDP
+          envFrom:
+            - secretRef:
+                name: labdash-secrets
+          env:
+            - name: SNMP_TRAP_PORT
+              value: "1620"
+            # DB_PATH is not set — DATABASE_URL takes precedence
+          securityContext:
+            capabilities:
+              add: ["NET_RAW"]
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 512Mi
+              cpu: 500m
+
+---
+# ─── LabDash Service ──────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: labdash
+  namespace: labdash
+spec:
+  selector:
+    app: labdash
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+    - name: snmp-trap
+      port: 1620
+      targetPort: 1620
+      protocol: UDP
+  type: ClusterIP
+
+---
+# ─── Ingress ──────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: labdash
+  namespace: labdash
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - labdash.cloud.mielito.com
+      secretName: labdash-tls-prod
+  rules:
+    - host: labdash.cloud.mielito.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: labdash
+                port:
+                  number: 80
+
+---
+# ─── CronJob: PostgreSQL backup (pg_dump daily at 03:00) ─────────────────────
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup
+  namespace: labdash
+spec:
+  schedule: "0 3 * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: pg-dump
+              image: postgres:16-alpine
+              command:
+                - sh
+                - -c
+                - |
+                  DATE=$(date +%Y%m%d_%H%M%S)
+                  pg_dump "$DATABASE_URL" -Fc -f /backups/labdash_${DATE}.dump
+                  # Keep only the 7 most recent dumps
+                  ls -t /backups/labdash_*.dump | tail -n +8 | xargs -r rm -f
+                  echo "Backup done: labdash_${DATE}.dump"
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: labdash-secrets
+                      key: DATABASE_URL
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: labdash-backups
+
+---
+# ─── PVC for backups ──────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: labdash-backups
+  namespace: labdash
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+  # storageClassName: longhorn
