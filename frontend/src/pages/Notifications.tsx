@@ -56,6 +56,10 @@ function fmtRelative(ts: number) {
 export default function Notifications({ onToast }: Props) {
     const [tab, setTab] = useState<'telegram' | 'rules' | 'history'>('telegram')
 
+    // Maintenance mode state
+    const [maintenance, setMaintenance]   = useState<boolean>(false)
+    const [maintLoading, setMaintLoading] = useState(false)
+
     // Telegram state
     const [tgStatus, setTgStatus]     = useState<TgStatus | null>(null)
     const [tgToken,  setTgToken]      = useState('')
@@ -79,12 +83,13 @@ export default function Notifications({ onToast }: Props) {
     })
 
     const loadAll = useCallback(async () => {
-        const [tg, r, s, h, mk] = await Promise.allSettled([
+        const [tg, r, s, h, mk, maint] = await Promise.allSettled([
             api.telegramStatus(),
             api.alertsApi.list(),
             api.alertSilences(),
             api.getAlertHistory(200),
             api.metricsKeys(),
+            api.maintenanceStatus(),
         ])
         if (tg.status === 'fulfilled') {
             const d = tg.value as TgStatus
@@ -95,10 +100,11 @@ export default function Notifications({ onToast }: Props) {
             if (d.chat_id) setTgChat(d.chat_id)
             setTgDigest(d.daily_digest)
         }
-        if (r.status  === 'fulfilled') setRules((r.value as any).rules ?? [])
-        if (s.status  === 'fulfilled') setSilences((s.value as any).silences ?? [])
-        if (h.status  === 'fulfilled') setHistory((h.value as any).entries ?? [])
-        if (mk.status === 'fulfilled') setMetricKeys((mk.value as any).keys ?? [])
+        if (r.status     === 'fulfilled') setRules((r.value as any).rules ?? [])
+        if (s.status     === 'fulfilled') setSilences((s.value as any).silences ?? [])
+        if (h.status     === 'fulfilled') setHistory((h.value as any).entries ?? [])
+        if (mk.status    === 'fulfilled') setMetricKeys((mk.value as any).keys ?? [])
+        if (maint.status === 'fulfilled') setMaintenance((maint.value as any).enabled ?? false)
     }, [])
 
     useEffect(() => { loadAll() }, [loadAll])
@@ -195,6 +201,17 @@ export default function Notifications({ onToast }: Props) {
     const silenceMap: Record<number, Silence> = {}
     silences.forEach(s => { silenceMap[s.rule_id] = s })
 
+    const handleToggleMaintenance = async () => {
+        setMaintLoading(true)
+        try {
+            await api.setMaintenance(!maintenance)
+            setMaintenance(prev => !prev)
+            onToast('success', !maintenance ? '✓ Modo mantenimiento activado' : '✓ Modo mantenimiento desactivado')
+        } catch (e: any) {
+            onToast('error', e.message || 'Error al cambiar modo mantenimiento')
+        } finally { setMaintLoading(false) }
+    }
+
     // ── Styles ─────────────────────────────────────────────────────────────────
     const inputStyle: any = {
         width: '100%', background: 'rgba(15,22,40,0.8)', border: '1px solid var(--border)',
@@ -204,10 +221,90 @@ export default function Notifications({ onToast }: Props) {
     const labelStyle: any = { fontSize: 11, color: 'var(--muted)', marginBottom: 4, display: 'block' }
     const fieldStyle: any = { display: 'flex', flexDirection: 'column', gap: 4 }
 
+    const handleClearEvents = async () => {
+        if (!confirm('¿Borrar todos los eventos del registro?')) return
+        try {
+            await api.clearEvents()
+            onToast('success', '✓ Eventos borrados')
+        } catch (e: any) {
+            onToast('error', e.message || 'Error al borrar eventos')
+        }
+    }
+
     return (
         <div>
-            <div className="sec-title" style={{ marginBottom: 20 }}>
-                <i className="fa-solid fa-bell" /> Notificaciones
+            <div className="sec-title" style={{ marginBottom: 20, display: 'flex', alignItems: 'center', gap: 12 }}>
+                <span><i className="fa-solid fa-bell" /> Notificaciones</span>
+                <button
+                    onClick={handleClearEvents}
+                    title="Limpiar todos los eventos del registro"
+                    style={{
+                        marginLeft: 'auto', padding: '6px 14px', borderRadius: 8, fontSize: 12,
+                        cursor: 'pointer', background: 'rgba(252,129,129,.1)',
+                        border: '1px solid rgba(252,129,129,.3)', color: '#fc8181',
+                        display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600,
+                    }}
+                >
+                    <i className="fa-solid fa-trash-can" /> Limpiar eventos
+                </button>
+            </div>
+
+            {/* ── Maintenance mode banner + toggle ── */}
+            {maintenance && (
+                <div style={{
+                    marginBottom: 16, padding: '10px 16px',
+                    background: 'rgba(251,211,141,0.12)', border: '1px solid rgba(251,211,141,0.4)',
+                    borderRadius: 10, display: 'flex', alignItems: 'center', gap: 10,
+                    fontSize: 13, color: '#fbd38d',
+                }}>
+                    <i className="fa-solid fa-triangle-exclamation" />
+                    <span style={{ flex: 1, fontWeight: 500 }}>Modo mantenimiento activo — todas las alertas están silenciadas</span>
+                </div>
+            )}
+
+            <div style={{
+                marginBottom: 20, padding: '12px 16px',
+                background: 'rgba(15,22,40,0.7)', border: '1px solid var(--border)',
+                borderRadius: 12, display: 'flex', alignItems: 'center', gap: 14,
+            }}>
+                <i className="fa-solid fa-wrench" style={{ color: maintenance ? '#fbd38d' : 'var(--muted)', fontSize: 16 }} />
+                <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>Modo mantenimiento</div>
+                    <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>
+                        Silencia globalmente todas las alertas y notificaciones
+                    </div>
+                </div>
+                <span style={{
+                    fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 20,
+                    background: maintenance ? 'rgba(251,211,141,0.15)' : 'rgba(104,211,145,0.12)',
+                    color: maintenance ? '#fbd38d' : '#68d391',
+                    border: `1px solid ${maintenance ? 'rgba(251,211,141,0.4)' : 'rgba(104,211,145,0.3)'}`,
+                }}>
+                    <span style={{
+                        display: 'inline-block', width: 6, height: 6, borderRadius: '50%', marginRight: 5,
+                        background: maintenance ? '#fbd38d' : '#68d391', verticalAlign: 'middle',
+                    }} />
+                    {maintenance ? 'Activo' : 'Inactivo'}
+                </span>
+                <button
+                    onClick={handleToggleMaintenance}
+                    disabled={maintLoading}
+                    style={{
+                        background: maintenance ? 'rgba(104,211,145,0.12)' : 'rgba(251,211,141,0.12)',
+                        border: `1px solid ${maintenance ? 'rgba(104,211,145,0.35)' : 'rgba(251,211,141,0.35)'}`,
+                        color: maintenance ? '#68d391' : '#fbd38d',
+                        borderRadius: 8, cursor: maintLoading ? 'not-allowed' : 'pointer',
+                        padding: '6px 14px', fontSize: 12, fontWeight: 600,
+                        display: 'flex', alignItems: 'center', gap: 6, opacity: maintLoading ? 0.6 : 1,
+                    }}
+                >
+                    {maintLoading
+                        ? <><i className="fa-solid fa-spinner fa-spin" /> Guardando…</>
+                        : maintenance
+                            ? <><i className="fa-solid fa-play" /> Desactivar</>
+                            : <><i className="fa-solid fa-pause" /> Activar mantenimiento</>
+                    }
+                </button>
             </div>
 
             {/* Tab bar */}

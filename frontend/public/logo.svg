@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192">
+  <!-- Background -->
+  <rect width="192" height="192" rx="32" fill="#0a0e1a"/>
+
+  <!-- Outer triangle edges (low opacity) -->
+  <!-- top → bottom-left -->
+  <line x1="96" y1="28" x2="42" y2="138" stroke="#63b3ed" stroke-width="5" stroke-opacity="0.3"/>
+  <!-- top → bottom-right -->
+  <line x1="96" y1="28" x2="150" y2="138" stroke="#b794f4" stroke-width="5" stroke-opacity="0.3"/>
+  <!-- bottom-left → bottom-right -->
+  <line x1="42" y1="138" x2="150" y2="138" stroke="#68d391" stroke-width="5" stroke-opacity="0.3"/>
+
+  <!-- Hub connectors (white, medium opacity) -->
+  <line x1="96" y1="28" x2="96" y2="100" stroke="white" stroke-width="7" stroke-opacity="0.5"/>
+  <line x1="42" y1="138" x2="96" y2="100" stroke="white" stroke-width="7" stroke-opacity="0.5"/>
+  <line x1="150" y1="138" x2="96" y2="100" stroke="white" stroke-width="7" stroke-opacity="0.5"/>
+
+  <!-- Center hub -->
+  <circle cx="96" cy="100" r="14" fill="#fbd38d"/>
+
+  <!-- Outer nodes -->
+  <circle cx="96" cy="28" r="20" fill="#63b3ed"/>
+  <circle cx="42" cy="138" r="20" fill="#68d391"/>
+  <circle cx="150" cy="138" r="20" fill="#b794f4"/>
+
+  <!-- LABDASH text -->
+  <text
+    x="96" y="182"
+    text-anchor="middle"
+    font-family="Inter, sans-serif"
+    font-weight="700"
+    font-size="24"
+    fill="#63b3ed"
+    letter-spacing="3"
+  >LABDASH</text>
+</svg>

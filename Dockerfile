@@ -2,13 +2,15 @@
 FROM node:22-slim AS builder
 WORKDIR /app/frontend
 # Install rsvg-convert to generate PWA icons from SVG
-RUN apt-get update && apt-get install -y --no-install-recommends librsvg2-bin && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends librsvg2-bin imagemagick && rm -rf /var/lib/apt/lists/*
 COPY frontend/package*.json ./
 RUN npm install
 COPY frontend/ ./
 # Generate PWA icons from SVG
-RUN rsvg-convert -w 192 -h 192 public/icon.svg -o public/icon-192.png && \
-    rsvg-convert -w 512 -h 512 public/icon.svg -o public/icon-512.png
+RUN rsvg-convert -w 192 -h 192 public/icon.svg    -o public/icon-192.png && \
+    rsvg-convert -w 512 -h 512 public/icon.svg    -o public/icon-512.png && \
+    rsvg-convert -w 32  -h 32  public/favicon.svg -o public/favicon-32.png && \
+    convert public/favicon-32.png public/favicon.ico
 RUN npm run build
 
 # ─── Stage 2: Python runtime ─────────────────────────────────────────────────

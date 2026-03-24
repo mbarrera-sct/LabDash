@@ -100,18 +100,8 @@ body::before {
   z-index: 0;
 }
 
-/* ── Layout ── */
-.app-shell {
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-  position: relative;
-  z-index: 1;
-}
-
-/* ── Redesigned Header ── */
-.header,
-.app-header {
+/* ── Header ── */
+.header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -176,96 +166,7 @@ body::before {
   box-shadow: 0 0 14px rgba(99, 179, 237, 0.35), 0 2px 6px rgba(0, 0, 0, 0.3);
 }
 
-.logo {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-}
-
-.logo-icon {
-  width: 44px;
-  height: 44px;
-  background: linear-gradient(135deg, #2b6cb0, #63b3ed);
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 20px;
-  box-shadow: 0 0 20px var(--glow);
-  flex-shrink: 0;
-}
-
-.logo h1 {
-  font-size: 22px;
-  font-weight: 700;
-  letter-spacing: -.5px;
-}
-
-.logo h1 span {
-  color: var(--accent);
-}
-
-.logo p {
-  color: var(--muted);
-  font-size: 11px;
-  margin-top: 1px;
-}
-
-/* ── Nav tabs ── */
-.nav-tabs {
-  display: flex;
-  gap: 4px;
-}
-
-.nav-tab {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 7px 16px;
-  border-radius: 8px;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--muted);
-  transition: all .15s;
-}
-
-.nav-tab:hover {
-  color: var(--text);
-  background: var(--card);
-  border-color: var(--border);
-}
-
-.nav-tab.active {
-  color: var(--accent);
-  background: rgba(99, 179, 237, .1);
-  border-color: rgba(99, 179, 237, .3);
-}
-
-/* ── Header badges ── */
-.header-badges {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.badge {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 20px;
-  padding: 4px 12px;
-  font-size: 11px;
-  font-weight: 500;
-  white-space: nowrap;
-}
-
 /* ── Main content ── */
-.app-content,
 .main-content {
   flex: 1;
   overflow-y: auto;
@@ -379,12 +280,6 @@ body::before {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: 16px;
-}
-
-.g4 {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
-  gap: 14px;
 }
 
 .g5 {
@@ -1113,31 +1008,16 @@ body::before {
   }
 
   /* Hide nav label text, show only icons */
-  .nav-btn span,
-  .nav-tab span {
+  .nav-btn span {
     display: none;
   }
 
-  .nav-btn,
-  .nav-tab {
+  .nav-btn {
     padding: 8px 10px;
     gap: 0;
   }
 
-  /* Header badges — hide on very small screens */
-  .header-badges {
-    display: none;
-  }
-
-  /* Nav tabs */
-  .nav-tabs {
-    width: 100%;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-  }
-
   /* Content area */
-  .app-content,
   .main-content {
     padding: 12px;
   }
@@ -1145,7 +1025,6 @@ body::before {
   /* Grids collapse to single column */
   .g2,
   .g3,
-  .g4,
   .g5 {
     grid-template-columns: 1fr;
   }
@@ -1342,8 +1221,7 @@ html.light-mode body::before {
     linear-gradient(90deg, rgba(43, 108, 176, .04) 1px, transparent 1px);
 }
 
-html.light-mode .header,
-html.light-mode .app-header {
+html.light-mode .header {
   background: rgba(240, 244, 248, 0.97);
   border-bottom-color: var(--border);
 }
@@ -1464,3 +1342,224 @@ html.light-mode .val-yellow { color: #975a16 !important; }
 html.light-mode .val-red    { color: #c53030 !important; }
 html.light-mode .val-purple { color: #553c9a !important; }
 html.light-mode .val-teal   { color: #285e61 !important; }
+
+/* ── Drag-and-drop handle ────────────────────────────────── */
+.sortable-cards-grid > * {
+  position: relative;
+}
+
+.sortable-cards-grid > *:hover .drag-handle {
+  opacity: 1 !important;
+}
+
+/* ── Mobile responsive ─────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* Allow scrolling on mobile (overrides overflow: hidden) */
+  html,
+  body {
+    overflow: auto !important;
+  }
+
+  #root {
+    overflow: auto !important;
+    height: auto !important;
+    min-height: 100%;
+  }
+
+  /* ── Header: compact layout ── */
+  .header {
+    padding: 0 12px;
+    height: auto;
+    min-height: 56px;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
+
+  .header-brand .header-title {
+    font-size: 14px;
+  }
+
+  /* Nav: horizontal scroll */
+  .header-nav {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    gap: 2px;
+    width: 100%;
+    order: 3;
+    padding-bottom: 2px;
+  }
+
+  .header-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .nav-btn {
+    padding: 5px 10px;
+    font-size: 11px;
+    gap: 5px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  /* ── Main content: more padding reduction ── */
+  .main-content {
+    padding: 12px;
+    overflow-y: auto;
+  }
+
+  /* ── Cards: single column on very small, 2-col on tablet ── */
+  .g2 {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .g3 {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .g5 {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
+
+  .sortable-cards-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* ── Stat cards: stack 2-per-row ── */
+  .stat-card {
+    padding: 12px;
+  }
+
+  .stat-value {
+    font-size: 22px;
+  }
+
+  /* ── Tables: horizontal scroll ── */
+  .data-table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    white-space: nowrap;
+    font-size: 10px;
+  }
+
+  /* ── Cards: slightly smaller padding ── */
+  .card {
+    padding: 14px;
+    border-radius: 12px;
+  }
+
+  .card:hover {
+    transform: none;
+  }
+
+  /* ── Modals: full-width on mobile ── */
+  [style*="position: fixed"][style*="display: flex"] > div {
+    max-width: 100% !important;
+    width: 100% !important;
+    margin: 0 !important;
+    border-radius: 16px 16px 0 0 !important;
+    position: fixed !important;
+    bottom: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    max-height: 90vh !important;
+  }
+
+  /* ── Section titles: smaller ── */
+  .sec-title {
+    font-size: 9px;
+    letter-spacing: 1.5px;
+  }
+
+  /* ── Buttons in toolbars: wrap ── */
+  .btn-row,
+  [style*="display: flex"][style*="gap"] > button {
+    flex-shrink: 0;
+  }
+
+  /* ── Font size slightly smaller ── */
+  body {
+    font-size: 13px;
+  }
+
+  .kv-key,
+  .kv-val {
+    font-size: 11px;
+  }
+
+  /* ── Nav badges: hide text in header user badge on small screens ── */
+  .header-badges .badge span:not(.dot) {
+    display: none;
+  }
+
+  /* ── KV rows: more compact ── */
+  .kv-row {
+    padding: 5px 0;
+  }
+
+  /* ── KV rows: wrap long values ── */
+  .kv-row {
+    flex-wrap: wrap;
+  }
+
+  .kv-val {
+    max-width: 55%;
+    word-break: break-word;
+    white-space: normal;
+  }
+
+  /* ── Card header: allow pill + title to wrap ── */
+  .card-header {
+    flex-wrap: wrap;
+  }
+
+  /* ── Hide keyboard shortcut hints in header ── */
+  .header kbd {
+    display: none;
+  }
+
+  /* ── Header actions: tighter gap ── */
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  /* ── Nav scroll fade hint ── */
+  .header-nav {
+    position: relative;
+  }
+}
+
+@media (max-width: 480px) {
+  /* Extra small: force everything to 1 column */
+  .g5 {
+    grid-template-columns: 1fr;
+  }
+
+  .header-brand > div > span:last-child {
+    display: none;
+  }
+
+  /* ── Header title: extra compact ── */
+  .header-brand .header-title {
+    font-size: 12px;
+  }
+
+  /* ── Header buttons: smaller and more compact ── */
+  .header button {
+    font-size: 11px;
+    padding: 4px 7px !important;
+  }
+
+  /* ── Hide keyboard shortcut hints everywhere ── */
+  kbd {
+    display: none !important;
+  }
+}

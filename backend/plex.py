@@ -3,6 +3,8 @@ import time, os
 import httpx
 from db import get_setting
 
+_SSL_VERIFY = os.environ.get("SSL_VERIFY", "false").lower() in ("true", "1", "yes")
+
 _cache: dict = {"data": None, "ts": 0}
 TTL = 60
 
@@ -17,7 +19,7 @@ async def fetch() -> tuple[dict, str | None]:
             return _cache.get("data") or {}, "Plex credentials not configured"
 
         headers = {"X-Plex-Token": token, "Accept": "application/json"}
-        async with httpx.AsyncClient(base_url=url, verify=False, timeout=10, headers=headers) as c:
+        async with httpx.AsyncClient(base_url=url, verify=_SSL_VERIFY, timeout=10, headers=headers) as c:
             info_r = await c.get("/")
             info_r.raise_for_status()
             libs_r = await c.get("/library/sections")
@@ -42,11 +44,27 @@ async def fetch() -> tuple[dict, str | None]:
                 except Exception:
                     lib_counts[key] = lib.get("count") or 0
 
-            # Active streams
-            sessions = 0
+            # Active streams with detail
+            session_count = 0
+            session_details = []
             try:
                 sess_r = await c.get("/status/sessions")
-                sessions = int(sess_r.json().get("MediaContainer", {}).get("size", 0))
+                sess_mc = sess_r.json().get("MediaContainer", {})
+                sess_list = sess_mc.get("Metadata") or []
+                session_count = int(sess_mc.get("size", len(sess_list)))
+                for s in sess_list:
+                    ts = s.get("TranscodeSession") or {}
+                    session_details.append({
+                        "title":    s.get("title", ""),
+                        "type":     s.get("type", ""),
+                        "user":     (s.get("User") or {}).get("title", ""),
+                        "player":   (s.get("Player") or {}).get("title", ""),
+                        "state":    (s.get("Player") or {}).get("state", ""),
+                        "transcoding":      bool(ts),
+                        "video_decision":   ts.get("videoDecision", "directplay"),
+                        "audio_decision":   ts.get("audioDecision", "directplay"),
+                        "transcode_speed":  ts.get("speed"),
+                    })
             except Exception:
                 pass
 
@@ -54,7 +72,8 @@ async def fetch() -> tuple[dict, str | None]:
             "server_name": server.get("friendlyName", "Plex"),
             "version":     server.get("version", ""),
             "platform":    server.get("platform", ""),
-            "sessions":    sessions,
+            "sessions":    session_count,
+            "session_details": session_details,
             "libraries": [
                 {
                     "key":   l.get("key", ""),

@@ -53,8 +53,9 @@ export default function UnraidPage({ onToast: _onToast }: Props) {
     const freePct       = totalBytes ? Math.round((1 - usedBytes / totalBytes) * 100) : 0
     const usedPct       = 100 - freePct
 
-    const statusColor = arrayStatus === 'Started' ? '#68d391'
-        : arrayStatus === 'Stopped' ? '#fc8181'
+    const arrayUp = arrayStatus === 'Started' || arrayStatus === 'STARTED'
+    const statusColor = arrayUp ? '#68d391'
+        : (arrayStatus === 'Stopped' || arrayStatus === 'STOPPED') ? '#fc8181'
         : '#fbd38d'
 
     const filteredDisks = allDisks.filter(d =>
@@ -119,7 +120,7 @@ export default function UnraidPage({ onToast: _onToast }: Props) {
                         {system.uptime    && <div><span style={{ color: 'var(--muted)' }}>Uptime: </span><span style={{ color: 'var(--text)' }}>{fmtUptime(system.uptime)}</span></div>}
                         {system.cpu_model && <div><span style={{ color: 'var(--muted)' }}>CPU: </span><span style={{ color: 'var(--text)' }}>{system.cpu_model}</span></div>}
                         {system.cpu_cores && <div><span style={{ color: 'var(--muted)' }}>Cores: </span><span style={{ color: 'var(--text)' }}>{system.cpu_cores}</span></div>}
-                        {system.mem_total && <div><span style={{ color: 'var(--muted)' }}>RAM total: </span><span style={{ color: 'var(--text)' }}>{fmtBytes(system.mem_total)}</span></div>}
+                        {system.mem_total && system.mem_used > 0 && <div><span style={{ color: 'var(--muted)' }}>RAM: </span><span style={{ color: 'var(--text)' }}>{fmtBytes(system.mem_used)} / {fmtBytes(system.mem_total)}</span></div>}
                     </div>
                 </div>
             )}

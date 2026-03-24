@@ -1,6 +1,7 @@
 """SNMP switch poller — IF-MIB interface status + bandwidth.
 Polls every 10 s; calculates KB/s from 64-bit counter deltas.
 Supports multiple targets via snmp_targets JSON config.
+Compatible with pysnmp 7.x (async API).
 """
 import asyncio, json, os, time
 import db
@@ -15,6 +16,16 @@ _OID_ifHCIn        = "1.3.6.1.2.1.31.1.1.1.6"
 _OID_ifHCOut       = "1.3.6.1.2.1.31.1.1.1.10"
 _OID_ifAlias       = "1.3.6.1.2.1.31.1.1.1.18"
 _OID_ifName        = "1.3.6.1.2.1.31.1.1.1.1"
+
+_OID_sysDescr      = "1.3.6.1.2.1.1.1"
+_OID_sysName       = "1.3.6.1.2.1.1.5"
+_OID_sysUpTime     = "1.3.6.1.2.1.1.3"
+_OID_sysLocation   = "1.3.6.1.2.1.1.6"
+_OID_ifHighSpeed   = "1.3.6.1.2.1.31.1.1.1.15"   # Mbps
+_OID_ifInErrors    = "1.3.6.1.2.1.2.2.1.14"
+_OID_ifOutErrors   = "1.3.6.1.2.1.2.2.1.20"
+_OID_ifInDiscards  = "1.3.6.1.2.1.2.2.1.13"
+_OID_ifOutDiscards = "1.3.6.1.2.1.2.2.1.19"
 
 
 async def get_targets() -> list[dict]:
@@ -73,49 +84,77 @@ async def _fetch_target(target: dict) -> tuple[dict | None, str | None]:
         return cached["data"], None
     try:
         udp_port = int(port_raw)
-        data = await asyncio.to_thread(_poll_sync, host, community, udp_port)
+        data = await _poll_async(host, community, udp_port)
         _cache[name] = {"data": data, "ts": now}
         return data, None
     except Exception as exc:
         return cached.get("data"), str(exc)
 
 
-def _poll_sync(host: str, community: str, port: int = 161) -> dict:
-    from pysnmp.hlapi import (
+async def _walk(engine, auth, transport, ctx, oid: str) -> dict:
+    """Walk a single OID subtree, return {index: value} dict."""
+    from pysnmp.hlapi.v3arch.asyncio import walk_cmd, ObjectType, ObjectIdentity
+    result: dict = {}
+    async for err_ind, err_status, _, var_binds in walk_cmd(
+        engine, auth, transport, ctx,
+        ObjectType(ObjectIdentity(oid)),
+        lexicographicMode=False,
+    ):
+        if err_ind or err_status:
+            break
+        for vb in var_binds:
+            oid_str, val = vb
+            idx = str(oid_str).rsplit(".", 1)[-1]
+            result[idx] = val
+    return result
+
+
+async def _poll_async(host: str, community: str, port: int = 161) -> dict:
+    from pysnmp.hlapi.v3arch.asyncio import (
         SnmpEngine, CommunityData, UdpTransportTarget, ContextData,
-        ObjectType, ObjectIdentity, nextCmd,
     )
 
-    engine = SnmpEngine()
+    engine    = SnmpEngine()
+    auth      = CommunityData(community, mpModel=1)   # SNMPv2c
+    transport = await UdpTransportTarget.create((host, port), timeout=3, retries=1)
+    ctx       = ContextData()
 
-    def walk(base_oid: str) -> dict:
-        result: dict = {}
-        for err_ind, err_status, _, var_binds in nextCmd(
-            engine,
-            CommunityData(community, mpModel=1),           # SNMPv2c
-            UdpTransportTarget((host, port), timeout=3, retries=1),
-            ContextData(),
-            ObjectType(ObjectIdentity(base_oid)),
-            lexicographicMode=False,
-            ignoreNonIncreasingOid=True,
-        ):
-            if err_ind or err_status:
-                break
-            for vb in var_binds:
-                oid_str, val = vb
-                idx = str(oid_str).rsplit(".", 1)[-1]
-                result[idx] = val
-        return result
-
-    statuses = walk(_OID_ifOperStatus)
+    statuses = await _walk(engine, auth, transport, ctx, _OID_ifOperStatus)
     if not statuses:
-        return {"ports": []}
+        return {"ports": [], "system": {}}
 
-    descrs    = walk(_OID_ifDescr)
-    names     = walk(_OID_ifName)
-    aliases   = walk(_OID_ifAlias)
-    in_octs   = walk(_OID_ifHCIn)
-    out_octs  = walk(_OID_ifHCOut)
+    (descrs, names, aliases, in_octs, out_octs,
+     speeds, in_errs, out_errs, in_disc, out_disc) = await asyncio.gather(
+        _walk(engine, auth, transport, ctx, _OID_ifDescr),
+        _walk(engine, auth, transport, ctx, _OID_ifName),
+        _walk(engine, auth, transport, ctx, _OID_ifAlias),
+        _walk(engine, auth, transport, ctx, _OID_ifHCIn),
+        _walk(engine, auth, transport, ctx, _OID_ifHCOut),
+        _walk(engine, auth, transport, ctx, _OID_ifHighSpeed),
+        _walk(engine, auth, transport, ctx, _OID_ifInErrors),
+        _walk(engine, auth, transport, ctx, _OID_ifOutErrors),
+        _walk(engine, auth, transport, ctx, _OID_ifInDiscards),
+        _walk(engine, auth, transport, ctx, _OID_ifOutDiscards),
+    )
+
+    from pysnmp.hlapi.v3arch.asyncio import get_cmd, ObjectType, ObjectIdentity
+    sys_info = {}
+    try:
+        for label, oid in [
+            ("name",     _OID_sysName     + ".0"),
+            ("descr",    _OID_sysDescr    + ".0"),
+            ("location", _OID_sysLocation + ".0"),
+            ("uptime",   _OID_sysUpTime   + ".0"),
+        ]:
+            async for err_ind, err_status, _, vbs in get_cmd(
+                engine, auth, transport, ctx,
+                ObjectType(ObjectIdentity(oid)),
+            ):
+                if not err_ind and not err_status and vbs:
+                    sys_info[label] = str(vbs[0][1])
+                break
+    except Exception:
+        pass
 
     now = time.time()
     ports = []
@@ -141,18 +180,29 @@ def _poll_sync(host: str, community: str, port: int = 161) -> dict:
         except (TypeError, ValueError):
             up = False
 
-        name_str  = str(names.get(idx)   or descrs.get(idx) or f"if{idx}")
-        alias = str(aliases.get(idx) or "")
-        descr = str(descrs.get(idx)  or name_str)
+        name_str = str(names.get(idx)  or descrs.get(idx) or f"if{idx}")
+        alias    = str(aliases.get(idx) or "")
+        descr    = str(descrs.get(idx)  or name_str)
+
+        speed_mbps = int(speeds.get(idx) or 0)
+        in_err  = int(in_errs.get(idx)   or 0)
+        out_err = int(out_errs.get(idx)  or 0)
+        in_dis  = int(in_disc.get(idx)   or 0)
+        out_dis = int(out_disc.get(idx)  or 0)
 
         ports.append({
-            "idx":      int(idx),
-            "name":     name_str,
-            "descr":    descr,
-            "alias":    alias,
-            "up":       up,
-            "in_kbps":  round(in_kbps,  1),
-            "out_kbps": round(out_kbps, 1),
+            "idx":          int(idx),
+            "name":         name_str,
+            "descr":        descr,
+            "alias":        alias,
+            "up":           up,
+            "in_kbps":      round(in_kbps,  1),
+            "out_kbps":     round(out_kbps, 1),
+            "speed_mbps":   speed_mbps,
+            "in_errors":    in_err,
+            "out_errors":   out_err,
+            "in_discards":  in_dis,
+            "out_discards": out_dis,
         })
 
     # Prune stale counter entries for interfaces no longer visible on this host
@@ -160,4 +210,7 @@ def _poll_sync(host: str, community: str, port: int = 161) -> dict:
     for k in [k for k in _prev_counters if k.startswith(f"{host}:") and k not in seen]:
         del _prev_counters[k]
 
-    return {"ports": sorted(ports, key=lambda p: p["idx"])}
+    return {
+        "ports":  sorted(ports, key=lambda p: p["idx"]),
+        "system": sys_info,
+    }

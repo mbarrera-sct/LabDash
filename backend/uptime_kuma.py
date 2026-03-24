@@ -3,6 +3,8 @@ import time, os
 import httpx
 from db import get_setting
 
+_SSL_VERIFY = os.environ.get("SSL_VERIFY", "false").lower() in ("true", "1", "yes")
+
 _cache: dict = {"data": None, "ts": 0}
 TTL = 60
 
@@ -17,7 +19,7 @@ async def fetch() -> tuple[dict, str | None]:
         if not url:
             return _cache.get("data") or {}, "Uptime Kuma not configured"
 
-        async with httpx.AsyncClient(base_url=url, verify=False, timeout=10) as c:
+        async with httpx.AsyncClient(base_url=url, verify=_SSL_VERIFY, timeout=10) as c:
             r = await c.get(f"/api/status-page/heartbeat/{slug}")
             r.raise_for_status()
             payload = r.json()

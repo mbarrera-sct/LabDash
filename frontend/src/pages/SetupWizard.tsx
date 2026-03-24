@@ -355,8 +355,8 @@ export default function SetupWizard({ onDone }: Props) {
     }
 
     const collectAndAdvance = (skip = false) => {
+        const newVals: Record<string, string> = { ...allValues }
         if (!skip) {
-            const newVals: Record<string, string> = { ...allValues }
             if (current.fields) {
                 current.fields.forEach(f => {
                     if (fieldVals[f.key]) newVals[f.key] = fieldVals[f.key]
@@ -373,7 +373,7 @@ export default function SetupWizard({ onDone }: Props) {
         setFieldVals({})
         setHelpOpen(false)
         if (isLast) {
-            finish(skip ? allValues : { ...allValues, ...fieldVals })
+            finish(newVals)
         } else {
             setStep(s => s + 1)
         }
@@ -539,7 +539,7 @@ export default function SetupWizard({ onDone }: Props) {
                         <button
                             className="btn btn-primary"
                             style={{ width: '100%', justifyContent: 'center', fontSize: 14, padding: '10px 0' }}
-                            onClick={() => finish(allValues)}
+                            onClick={() => collectAndAdvance(false)}
                             disabled={saving}
                         >
                             {saving

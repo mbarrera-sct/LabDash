@@ -3,6 +3,9 @@ import time, os
 import httpx
 from db import get_setting
 
+# SSL_VERIFY=true to enable certificate verification (disabled by default — homelab self-signed certs)
+_SSL_VERIFY = os.environ.get("SSL_VERIFY", "false").lower() in ("true", "1", "yes")
+
 _cache: dict = {"data": None, "ts": 0}
 TTL = 20
 
@@ -30,7 +33,7 @@ async def fetch() -> tuple[dict, str | None]:
         if not pwd:
             return _cache.get("data") or {}, "Proxmox password not configured"
 
-        async with httpx.AsyncClient(base_url=url, verify=False, timeout=10) as c:
+        async with httpx.AsyncClient(base_url=url, verify=_SSL_VERIFY, timeout=10) as c:
             headers   = await _get_headers(c, user, pwd)
             resources = (await c.get("/api2/json/cluster/resources", headers=headers)).json()["data"]
             nodes     = (await c.get("/api2/json/nodes", headers=headers)).json()["data"]
@@ -53,7 +56,7 @@ async def test_connection() -> tuple[bool, str]:
         if not pwd:
             return False, "Contraseña no configurada"
 
-        async with httpx.AsyncClient(base_url=url, verify=False, timeout=8) as c:
+        async with httpx.AsyncClient(base_url=url, verify=_SSL_VERIFY, timeout=8) as c:
             headers = await _get_headers(c, user, pwd)
             r = await c.get("/api2/json/version", headers=headers)
             version = r.json().get("data", {}).get("version", "?")
@@ -86,7 +89,7 @@ async def vm_action(node: str, vmtype: str, vmid: int, action: str) -> tuple[boo
         user = await get_setting("pve_user", os.environ.get("PVE_USER", "root@pam"))
         pwd  = await get_setting("pve_pass", os.environ.get("PVE_PASS", ""))
 
-        async with httpx.AsyncClient(base_url=url, verify=False, timeout=15) as c:
+        async with httpx.AsyncClient(base_url=url, verify=_SSL_VERIFY, timeout=15) as c:
             headers = await _get_headers(c, user, pwd)
             path = f"/api2/json/nodes/{node}/{vmtype}/{vmid}/status/{action}"
             r = await c.post(path, headers=headers)

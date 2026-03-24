@@ -3,6 +3,8 @@ import time, os
 import httpx
 from db import get_setting
 
+_SSL_VERIFY = os.environ.get("SSL_VERIFY", "false").lower() in ("true", "1", "yes")
+
 _cache: dict = {"data": None, "ts": 0}
 TTL = 30
 
@@ -21,7 +23,7 @@ async def fetch() -> tuple[dict, str | None]:
         entity_filter = [e.strip() for e in entity_filter_raw.split(",") if e.strip()]
 
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        async with httpx.AsyncClient(base_url=url, verify=False, timeout=10, headers=headers) as c:
+        async with httpx.AsyncClient(base_url=url, verify=_SSL_VERIFY, timeout=10, headers=headers) as c:
             if entity_filter:
                 states = []
                 for entity_id in entity_filter:

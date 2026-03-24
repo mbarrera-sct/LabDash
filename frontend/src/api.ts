@@ -162,7 +162,7 @@ export const api = {
     plexInfo:     () => get("/api/plex/info"),
     immichStats:  () => get("/api/immich/stats"),
     haStates:     () => get("/api/ha/states"),
-    snmpInterfaces: () => get<{ ports: any[]; error: string | null }>("/api/snmp/interfaces"),
+    snmpInterfaces: () => get<{ ports: any[]; targets: string[]; systems: Record<string, any>; error: string | null }>("/api/snmp/interfaces"),
 
     // Diagram
     getDiagram:    () => get("/api/diagram"),
@@ -172,6 +172,7 @@ export const api = {
 
     // Settings
     getSettings:  () => get("/api/settings"),
+    getAppConfig: () => fetch("/api/app-config").then(r => r.json()) as Promise<{ app_name: string }>,
     saveSettings: (s: Record<string, string>) => post("/api/settings", s),
 
     // Metrics
@@ -186,6 +187,7 @@ export const api = {
         get<{ events: { id: number; ts: number; level: string; source: string; message: string }[] }>(
             `/api/events${limit ? `?limit=${limit}` : ""}`
         ),
+    clearEvents: () => del<{ ok: boolean }>("/api/events"),
 
     // Uptime
     getUptime: (host: string, hours?: number) =>
@@ -247,12 +249,12 @@ export const api = {
     silenceAlert:   (rule_id: number, hours: number) =>
         post<{ ok: boolean; until_ts: number }>(`/api/alert-rules/${rule_id}/silence`, { hours }),
 
-    // Alert history
-    getAlertHistory: (limit?: number) =>
-        get<{ entries: any[] }>(`/api/alert-history${limit ? `?limit=${limit}` : ""}`),
-
     // Dashboard bundle
     dashboardBundle: () => get<{ status: any; proxmox: any; opnsense: any; k8s: any; services: any }>("/api/dashboard/bundle"),
+
+    // Maintenance mode
+    maintenanceStatus: () => get<{ enabled: boolean }>("/api/maintenance"),
+    setMaintenance: (enabled: boolean) => post<{ ok: boolean }>("/api/maintenance", { enabled }),
 
     // Re-export alertsApi for Notifications page convenience
     alertsApi,

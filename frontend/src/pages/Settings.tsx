@@ -7,6 +7,7 @@ interface Props {
     currentUser: CurrentUser | null
     onUserUpdate: () => void
     onShowWizard?: () => void
+    onSettingsSaved?: () => void
 }
 
 const SECTIONS = [
@@ -36,8 +37,12 @@ const SECTIONS = [
     {
         id: 'unraid', title: 'Unraid', icon: 'fa-server', color: 'var(--accent4)',
         fields: [
-            { key: 'unraid_url', label: 'URL (ej. http://192.168.1.10)', type: 'text' },
-            { key: 'unraid_key', label: 'API Key',                       type: 'password' },
+            { key: 'unraid_url',       label: 'URL (ej. https://192.168.1.10)',       type: 'text' },
+            { key: 'unraid_key',       label: 'API Key',                               type: 'password' },
+            { key: 'unraid_temp_warn', label: 'Temp. disco aviso (°C, def. 50)',       type: 'text' },
+            { key: 'unraid_temp_crit', label: 'Temp. disco crítica (°C, def. 65)',     type: 'text' },
+            { key: 'unraid_cap_warn',  label: 'Capacidad array aviso (%, def. 85)',    type: 'text' },
+            { key: 'unraid_cap_crit',  label: 'Capacidad array crítica (%, def. 95)',  type: 'text' },
         ]
     },
     {
@@ -45,6 +50,8 @@ const SECTIONS = [
         fields: [
             { key: 'plex_url',   label: 'URL (ej. http://192.168.1.10:32400)', type: 'text' },
             { key: 'plex_token', label: 'X-Plex-Token',                        type: 'password' },
+            { key: 'plex_max_streams',   label: 'Máx. streams simultáneos (def. 10)',     type: 'text' },
+            { key: 'plex_max_transcode', label: 'Máx. transcodificaciones (def. 3)',       type: 'text' },
         ]
     },
     {
@@ -65,9 +72,12 @@ const SECTIONS = [
     {
         id: 'snmp', title: 'SNMP (Switch)', icon: 'fa-sitemap', color: 'var(--accent2)',
         fields: [
-            { key: 'snmp_host',      label: 'IP del switch (ej. 192.168.1.2)',      type: 'text' },
-            { key: 'snmp_community', label: 'Community string (ej. public)',         type: 'text' },
-            { key: 'snmp_port',      label: 'Puerto UDP (default: 161)',             type: 'text' },
+            { key: 'snmp_host',        label: 'IP del switch (ej. 192.168.1.2)',                       type: 'text' },
+            { key: 'snmp_community',   label: 'Community string (ej. public)',                          type: 'text' },
+            { key: 'snmp_port',        label: 'Puerto UDP (default: 161)',                              type: 'text' },
+            { key: 'snmp_targets',     label: 'Targets JSON (multi-switch, sobreescribe host/port)',   type: 'textarea' },
+            { key: 'snmp_bw_warn_pct', label: 'Alerta ancho de banda (% uso, def. 80)',                type: 'text' },
+            { key: 'snmp_err_warn',    label: 'Alerta errores puerto (acumulados, def. 100)',          type: 'text' },
         ]
     },
     {
@@ -97,10 +107,17 @@ const SECTIONS = [
             { key: 'snmp_trap_port', label: 'Puerto UDP para traps (default: 1620, requiere 162 con root)', type: 'text' },
         ]
     },
+    {
+        id: 'security', title: 'Seguridad', icon: 'fa-shield-halved', color: 'var(--accent5)',
+        fields: [
+            { key: 'app_name',              label: 'Nombre de la aplicación (def. LabDash)', type: 'text' },
+            { key: 'session_timeout_hours', label: 'Duración de sesión (horas, def. 12)',     type: 'text' },
+        ]
+    },
 ]
 
 
-export default function Settings({ onToast, currentUser, onUserUpdate, onShowWizard }: Props) {
+export default function Settings({ onToast, currentUser, onUserUpdate, onShowWizard, onSettingsSaved }: Props) {
     // ── Integration settings ───────────────────────────────────
     const [values, setValues] = useState<Record<string, string>>({})
     const [saving, setSaving] = useState(false)
@@ -162,6 +179,7 @@ export default function Settings({ onToast, currentUser, onUserUpdate, onShowWiz
         setSaving(true)
         try {
             await api.saveSettings(values)
+            onSettingsSaved?.()
             onToast('success', '✓ Configuración guardada. Los cachés se han invalidado.')
         } catch {
             onToast('error', 'Error al guardar la configuración')
@@ -346,10 +364,18 @@ export default function Settings({ onToast, currentUser, onUserUpdate, onShowWiz
             </p>
 
             {/* ── Integration sections ── */}
-            {SECTIONS.map(sec => (
+            {SECTIONS.map(sec => {
+                const primaryKey = sec.fields[0].key
+                const isConfigured = !!(values[primaryKey] && values[primaryKey] !== '***')
+                return (
                 <div key={sec.id} className="form-section">
                     <div className="form-section-title" style={{ color: sec.color }}>
                         <i className={`fa-solid ${sec.icon}`} />{sec.title}
+                        {isConfigured && (
+                            <span style={{ marginLeft: 8, fontSize: 10, color: '#68d391', background: 'rgba(104,211,145,0.12)', border: '1px solid rgba(104,211,145,0.3)', borderRadius: 10, padding: '1px 7px', fontWeight: 600 }}>
+                                ✓ Configurado
+                            </span>
+                        )}
                     </div>
                     {sec.id === 'proxmox' && (
                         <div style={{
@@ -367,13 +393,23 @@ export default function Settings({ onToast, currentUser, onUserUpdate, onShowWiz
                         {sec.fields.map(f => (
                             <div key={f.key} className="form-group">
                                 <label>{f.label}</label>
-                                <input
-                                    type={f.type}
-                                    value={values[f.key] ?? ''}
-                                    onChange={e => set(f.key, e.target.value)}
-                                    placeholder={values[f.key] === '***' ? '(guardado)' : ''}
-                                    autoComplete="off"
-                                />
+                                {f.type === 'textarea' ? (
+                                    <textarea
+                                        value={values[f.key] || ''}
+                                        onChange={e => setValues(v => ({ ...v, [f.key]: e.target.value }))}
+                                        rows={4}
+                                        placeholder={'[{"name":"switch1","host":"192.168.1.2","community":"public","port":"161"}]'}
+                                        style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 11, resize: 'vertical' }}
+                                    />
+                                ) : (
+                                    <input
+                                        type={f.type}
+                                        value={values[f.key] ?? ''}
+                                        onChange={e => set(f.key, e.target.value)}
+                                        placeholder={values[f.key] === '***' ? '(guardado)' : ''}
+                                        autoComplete="off"
+                                    />
+                                )}
                             </div>
                         ))}
                     </div>
@@ -389,7 +425,7 @@ export default function Settings({ onToast, currentUser, onUserUpdate, onShowWiz
                         </button>
                     )}
                 </div>
-            ))}
+            )})}
 
             {/* Session timeout */}
             <div className="form-section">

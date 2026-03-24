@@ -12,5 +12,14 @@ export default defineConfig({
     build: {
         outDir: 'dist',
         sourcemap: false,
+        rollupOptions: {
+            output: {
+                manualChunks: {
+                    'react-vendor':   ['react', 'react-dom'],
+                    'flow-vendor':    ['@xyflow/react'],
+                    'dnd-vendor':     ['@dnd-kit/core', '@dnd-kit/sortable', '@dnd-kit/utilities'],
+                },
+            },
+        },
     }
 })

@@ -3,6 +3,8 @@ import time, os
 import httpx
 from db import get_setting
 
+_SSL_VERIFY = os.environ.get("SSL_VERIFY", "false").lower() in ("true", "1", "yes")
+
 _cache: dict = {"data": None, "ts": 0}
 TTL = 60
 
@@ -17,7 +19,7 @@ async def fetch() -> tuple[dict, str | None]:
             return _cache.get("data") or {}, "Immich credentials not configured"
 
         headers = {"x-api-key": key}
-        async with httpx.AsyncClient(base_url=url, verify=False, timeout=10, headers=headers) as c:
+        async with httpx.AsyncClient(base_url=url, verify=_SSL_VERIFY, timeout=10, headers=headers) as c:
             r = await c.get("/api/server/statistics")
             r.raise_for_status()
 

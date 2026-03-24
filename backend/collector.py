@@ -1,6 +1,9 @@
 """Background metrics & uptime collector — runs every 60 s."""
-import asyncio, time
+import asyncio, logging, time
 import db, proxmox, opnsense, snmp, ping as pingmod
+import plex, immich, homeassistant, portainer, uptime_kuma, unraid
+
+log = logging.getLogger(__name__)
 
 INTERVAL = 60
 _prev_event_state: dict = {}  # track state changes for event generation
@@ -11,6 +14,25 @@ async def collect():
     now_state: dict = {}
     metric_rows: list = []   # batch: (ts, key, value)
     uptime_rows: list = []   # batch: (ts, host, up)
+
+    # ── Service availability metrics ──────────────────────────
+    service_checks = [
+        ("service.proxmox",       proxmox.fetch),
+        ("service.opnsense",      opnsense.fetch),
+        ("service.plex",          plex.fetch),
+        ("service.immich",        immich.fetch),
+        ("service.homeassistant", homeassistant.fetch),
+        ("service.portainer",     portainer.fetch),
+        ("service.uptime_kuma",   uptime_kuma.fetch),
+        ("service.unraid",        unraid.fetch),
+    ]
+    for svc_key, fetch_fn in service_checks:
+        try:
+            svc_data, svc_err = await fetch_fn()
+            is_up = bool(svc_data and not svc_err)
+        except Exception:
+            is_up = False
+        metric_rows.append((ts, svc_key, 1.0 if is_up else 0.0))
 
     # ── Proxmox ──────────────────────────────────────────────
     pve_data, _ = await proxmox.fetch()
@@ -54,6 +76,26 @@ async def collect():
                 await db.insert_event(ts, level, "OPNsense", msg)
             now_state[f"gw.up.{name}"] = up
 
+    # ── Unraid disk temps + array capacity ───────────────────
+    try:
+        disk_data, disk_err = await unraid.fetch_disks()
+        if disk_data and not disk_err:
+            cap = disk_data.get("capacity", {})
+            cap_total = cap.get("total", 0)
+            cap_used  = cap.get("used",  0)
+            if cap_total:
+                cap_pct = round(cap_used / cap_total * 100, 1)
+                metric_rows.append((ts, "unraid.array.capacity_pct", cap_pct))
+            arr_state = disk_data.get("status", "")
+            metric_rows.append((ts, "unraid.array.state", 1.0 if arr_state in ("STARTED", "Started") else 0.0))
+            for d in (disk_data.get("disks", []) + disk_data.get("parities", [])):
+                name = d.get("name") or d.get("device") or "disk"
+                temp = d.get("temp")
+                if temp is not None:
+                    metric_rows.append((ts, f"unraid.disk.temp.{name}", float(temp)))
+    except Exception as e:
+        log.warning("collector: error en unraid disks: %s", e)
+
     # ── SNMP bandwidth ────────────────────────────────────────
     snmp_data, _ = await snmp.fetch()
     if snmp_data:
@@ -91,8 +133,8 @@ async def collect():
                     msg = f"{label} ({ip}) {'volvió online' if up else 'sin respuesta'}"
                     await db.insert_event(ts, "info" if up else "warn", "Ping", msg)
                 now_state[f"ping.{ip}"] = up
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("collector: error en ping batch: %s", e)
 
     # ── Flush uptime in one DB round-trip ─────────────────────
     await db.batch_insert_uptime(uptime_rows)
@@ -110,6 +152,6 @@ async def run():
     while True:
         try:
             await collect()
-        except Exception:
-            pass
+        except Exception as e:
+            log.error("collector: error inesperado en collect(): %s", e)
         await asyncio.sleep(INTERVAL)

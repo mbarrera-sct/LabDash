@@ -1,18 +1,22 @@
 """LabDash — FastAPI backend."""
-import asyncio, os, time
+import asyncio, os, time, json, logging
 from collections import defaultdict
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Depends, Request, status
+from fastapi import FastAPI, HTTPException, Depends, Request, Response, status
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
 
+log = logging.getLogger(__name__)
+
 import db, proxmox, opnsense, k8s, unraid, plex, immich, homeassistant, templates, auth, snmp
+
+_SSL_VERIFY = os.environ.get("SSL_VERIFY", "false").lower() in ("true", "1", "yes")
 import portainer, uptime_kuma, tailscale, telegram as tgmod
 import ping as pingmod
 import collector, alerting, snmp_trap
@@ -41,7 +45,7 @@ def _cached(ttl: int = 15):
 FRONTEND = Path(__file__).parent.parent / "frontend" / "dist"
 
 # ── Public paths (no auth required) ──────────────────────────────────────────
-PUBLIC_PREFIXES = ("/healthz", "/api/auth/", "/assets/")
+PUBLIC_PREFIXES = ("/healthz", "/api/auth/", "/assets/", "/api/maintenance", "/metrics")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -56,10 +60,17 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="LabDash", lifespan=lifespan)
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# CORS: by default allows all origins (homelab — no public exposure).
+# Set CORS_ORIGINS=https://dash.home.local to restrict to specific origins.
+_cors_origins_raw = os.environ.get("CORS_ORIGINS", "*")
+_cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+_cors_credentials = "*" not in _cors_origins  # credentials only when origin is explicit
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -154,9 +165,25 @@ class TelegramConfigRequest(BaseModel):
 class SilenceRequest(BaseModel):
     hours: float = 1.0
 
+class MaintenanceRequest(BaseModel):
+    enabled: bool
+
 # ── Auth routes ───────────────────────────────────────────────────────────────
+def _set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key="labdash_session",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=auth.SESSION_TTL,
+        path="/",
+    )
+
+def _clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(key="labdash_session", path="/")
+
 @app.post("/api/auth/login")
-async def login(body: LoginRequest, request: Request):
+async def login(body: LoginRequest, request: Request, response: Response):
     ip = request.client.host if request.client else "unknown"
     auth.check_rate_limit(ip, body.username)
     user = await db.get_user_by_username(body.username)
@@ -169,10 +196,11 @@ async def login(body: LoginRequest, request: Request):
     else:
         token = await auth.create_session(user["id"], is_temp=False)
         await db.insert_audit(int(time.time()), body.username, "login", f"from {ip}")
+        _set_session_cookie(response, token)
         return {"token": token, "username": user["username"], "needs_totp": False}
 
 @app.post("/api/auth/verify-totp")
-async def verify_totp(body: TotpVerifyRequest):
+async def verify_totp(body: TotpVerifyRequest, response: Response):
     user = await auth.verify_session(body.temp_token, require_temp=True)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired temp token")
@@ -182,6 +210,7 @@ async def verify_totp(body: TotpVerifyRequest):
         raise HTTPException(status_code=401, detail="Invalid TOTP code")
     await db.delete_session(body.temp_token)
     token = await auth.create_session(user["id"], is_temp=False)
+    _set_session_cookie(response, token)
     return {"token": token, "username": user["username"]}
 
 @app.get("/api/auth/totp-setup")
@@ -198,7 +227,7 @@ async def get_totp_setup(request: Request):
     return {"secret": secret, "uri": uri, "username": user["username"]}
 
 @app.post("/api/auth/totp-setup")
-async def confirm_totp_setup(body: TotpSetupConfirmRequest):
+async def confirm_totp_setup(body: TotpSetupConfirmRequest, response: Response):
     user = await auth.verify_session(body.temp_token, require_temp=True)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired temp token")
@@ -210,6 +239,7 @@ async def confirm_totp_setup(body: TotpSetupConfirmRequest):
     await db.enable_totp(user["id"], secret)
     await db.delete_session(body.temp_token)
     token = await auth.create_session(user["id"], is_temp=False)
+    _set_session_cookie(response, token)
     return {"token": token, "username": user["username"]}
 
 @app.get("/api/auth/me")
@@ -217,11 +247,12 @@ async def me(user: dict = Depends(auth.get_current_user)):
     return {"id": user["id"], "username": user["username"], "totp_enabled": bool(user["totp_enabled"]), "role": user.get("role", "admin") or "admin"}
 
 @app.post("/api/auth/logout")
-async def logout(request: Request):
+async def logout(request: Request, response: Response):
     auth_header = request.headers.get("Authorization", "")
     token = auth_header[7:] if auth_header.startswith("Bearer ") else request.cookies.get("labdash_session", "")
     if token:
         await auth.delete_session_cached(token)
+    _clear_session_cookie(response)
     return {"ok": True}
 
 @app.post("/api/auth/change-password")
@@ -337,10 +368,148 @@ async def setup_complete(body: SetupCompleteRequest, user: dict = Depends(auth.g
     await db.set_setting("setup_completed", "true")
     return {"ok": True}
 
-# ── Healthz ───────────────────────────────────────────────────────────────────
+# ── Public app config (no auth) ──────────────────────────────────────────────
+@app.get("/api/app-config")
+async def app_config():
+    """Returns public app configuration (name, etc.) — no auth required."""
+    name = await db.get_setting("app_name", "") or "LabDash"
+    return {"app_name": name}
+
+# ── Healthz / Kubernetes probes ───────────────────────────────────────────────
 @app.get("/healthz")
 async def healthz():
+    """Backwards-compatible liveness probe."""
     return "ok"
+
+@app.get("/healthz/live")
+async def healthz_live():
+    """Kubernetes liveness probe — quick check, no DB."""
+    return {"status": "ok"}
+
+@app.get("/healthz/ready")
+async def healthz_ready():
+    """Kubernetes readiness probe — checks DB connectivity."""
+    try:
+        await db.get_setting("setup_completed", "")
+        return {"status": "ready"}
+    except Exception as exc:
+        log.warning("healthz/ready: DB check failed: %s", exc)
+        return JSONResponse({"status": "not_ready", "error": str(exc)}, status_code=503)
+
+# ── Maintenance / global silence mode ────────────────────────────────────────
+@app.get("/api/maintenance")
+async def get_maintenance():
+    """Public endpoint — returns current maintenance (global silence) state."""
+    enabled = await db.get_global_silence()
+    return {"enabled": enabled}
+
+@app.post("/api/maintenance")
+async def set_maintenance(body: MaintenanceRequest, request: Request):
+    """Admin-only — enable or disable global alert silence."""
+    # Manual auth (endpoint is in PUBLIC_PREFIXES so middleware is bypassed)
+    token = None
+    _auth_header = request.headers.get("Authorization", "")
+    if _auth_header.startswith("Bearer "):
+        token = _auth_header[7:]
+    if not token:
+        token = request.cookies.get("labdash_session")
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    user = await auth.verify_session(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Session expired")
+    role = (user.get("role") or "admin")
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    await db.set_global_silence(body.enabled)
+    username = user.get("username", "unknown")
+    detail = "maintenance enabled" if body.enabled else "maintenance disabled"
+    await db.insert_audit(int(time.time()), username, "maintenance", detail)
+    return {"ok": True, "enabled": body.enabled}
+
+# ── SSE — real-time event stream ──────────────────────────────────────────────
+@app.get("/api/events/stream")
+async def events_stream(request: Request):
+    """Server-Sent Events stream for real-time events. Requires auth."""
+    # Manual auth check (middleware skips this path — it's not in PUBLIC_PREFIXES
+    # but we handle it manually to support streaming)
+    token = None
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    if not token:
+        token = request.cookies.get("labdash_session")
+    if not token:
+        return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+    user = await auth.verify_session(token)
+    if not user:
+        return JSONResponse({"detail": "Session expired"}, status_code=401)
+
+    async def _generator():
+        last_id: int | None = None
+        last_keepalive = time.time()
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                events = await db.get_events(limit=10)
+                new_events = []
+                for ev in reversed(events):  # oldest first
+                    if last_id is None or ev["id"] > last_id:
+                        new_events.append(ev)
+                if new_events:
+                    for ev in new_events:
+                        last_id = ev["id"]
+                        yield f"data: {json.dumps(ev)}\n\n"
+                    last_keepalive = time.time()
+                else:
+                    if time.time() - last_keepalive >= 15:
+                        yield ": keepalive\n\n"
+                        last_keepalive = time.time()
+                await asyncio.sleep(2)
+        except asyncio.CancelledError:
+            pass
+
+    return StreamingResponse(
+        _generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+# ── Prometheus /metrics ───────────────────────────────────────────────────────
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus exposition format metrics endpoint."""
+    lines: list[str] = []
+    lines.append('# HELP labdash_info LabDash instance info')
+    lines.append('# TYPE labdash_info gauge')
+    lines.append('labdash_info{version="2.0.0"} 1')
+
+    try:
+        keys = await db.get_metric_keys()
+    except Exception:
+        keys = []
+
+    for key in keys:
+        try:
+            val = await db.get_metric_latest(key)
+        except Exception:
+            val = None
+        if val is None:
+            continue
+        metric_name = "labdash_metric_" + key.replace(".", "_").replace("-", "_")
+        safe_key = key.replace('"', '\\"')
+        lines.append(f'# HELP {metric_name} LabDash metric {key}')
+        lines.append(f'# TYPE {metric_name} gauge')
+        lines.append(f'{metric_name}{{key="{safe_key}"}} {val}')
+
+    return Response(
+        content="\n".join(lines) + "\n",
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
 
 # ── Proxmox ───────────────────────────────────────────────────────────────────
 @app.get("/api/proxmox/nodes")
@@ -419,8 +588,56 @@ async def opn_gateways():
 
 @app.get("/api/opnsense/sysinfo")
 async def opn_sysinfo():
+    import re as _re
     data, err = await opnsense.fetch()
-    return {"data": data.get("sysinfo", {}) if data else {}, "error": err}
+    if not data:
+        return {"data": {}, "error": err}
+
+    # ── Version (/api/diagnostics/system/systemInformation) ──────────────────
+    sys_info = data.get("sys_information", {}) or {}
+    version = None
+    versions_list = sys_info.get("versions", [])
+    if versions_list:
+        # First entry is e.g. "OPNsense 26.1.4-amd64" → extract "26.1.4"
+        m = _re.search(r'OPNsense\s+([\d.]+)', versions_list[0])
+        version = m.group(1) if m else versions_list[0]
+    hostname = sys_info.get("name")
+
+    # ── Memory (/api/diagnostics/system/systemResources) ─────────────────────
+    sys_res = data.get("sys_resources", {}) or {}
+    mem = sys_res.get("memory", {}) or {}
+    mem_total = int(mem["total"]) if mem.get("total") else None
+    mem_used  = int(mem["used"])  if mem.get("used")  else None
+
+    # ── CPU & Uptime (/api/diagnostics/activity/getActivity) ─────────────────
+    sys_act  = data.get("sys_activity", {}) or {}
+    headers  = sys_act.get("headers", [])
+    cpu_pct  = None
+    uptime_s = None
+
+    for line in headers:
+        # Uptime — "up 5+20:01:52" (days) or "up 1:30:45" (no days)
+        if uptime_s is None:
+            m = _re.search(r'\bup\s+(?:(\d+)\+)?(\d+):(\d+):(\d+)', line)
+            if m:
+                days = int(m.group(1) or 0)
+                h, mn, s = int(m.group(2)), int(m.group(3)), int(m.group(4))
+                uptime_s = days * 86400 + h * 3600 + mn * 60 + s
+        # CPU — "99.2% idle"
+        if cpu_pct is None:
+            m = _re.search(r'([\d.]+)%\s+idle', line)
+            if m:
+                cpu_pct = round(100.0 - float(m.group(1)), 1)
+
+    normalized = {
+        "product_version":   version,
+        "hostname":          hostname,
+        "uptime":            uptime_s,       # seconds — fmtUptime() on frontend
+        "cpu_usage_percent": cpu_pct,
+        "memory_used":       mem_used,
+        "memory_total":      mem_total,
+    }
+    return {"data": normalized, "error": err}
 
 @app.get("/api/opnsense/dhcp")
 async def opn_dhcp():
@@ -650,15 +867,19 @@ ALL_KEYS = [
     "opn_url", "opn_key", "opn_secret",
     "k8s_url", "k8s_token",
     "unraid_url", "unraid_key",
+    "unraid_temp_warn", "unraid_temp_crit", "unraid_cap_warn", "unraid_cap_crit",
     "plex_url", "plex_token",
+    "plex_max_streams", "plex_max_transcode",
     "immich_url", "immich_key",
     "ha_url", "ha_token", "ha_entities",
-    "snmp_host", "snmp_community", "snmp_port",
+    "snmp_host", "snmp_community", "snmp_port", "snmp_targets",
+    "snmp_bw_warn_pct", "snmp_err_warn",
     "session_timeout_hours",
     "portainer_url", "portainer_token",
     "uptime_kuma_url", "uptime_kuma_slug",
     "tailscale_tailnet", "tailscale_token",
     "snmp_trap_port",
+    "app_name",
 ]
 SECRET_KEYS = {"pve_pass", "opn_key", "opn_secret", "k8s_token", "unraid_key", "plex_token", "immich_key", "ha_token", "portainer_token", "tailscale_token"}
 
@@ -695,12 +916,15 @@ async def snmp_interfaces():
         return {"ports": [], "targets": [], "error": "; ".join(errors) if errors else None}
     # Flatten all targets' ports with target name attached
     all_ports = []
+    systems = {}
     for result in all_results:
         target_name = result.get("target", "default")
         for port in result.get("ports", []):
             all_ports.append({**port, "target": target_name})
+        if result.get("system"):
+            systems[target_name] = result["system"]
     target_names = [r.get("target", "default") for r in all_results]
-    return {"ports": all_ports, "targets": target_names, "error": "; ".join(errors) if errors and not all_ports else None}
+    return {"ports": all_ports, "targets": target_names, "systems": systems, "error": "; ".join(errors) if errors and not all_ports else None}
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
 @app.get("/api/metrics/{key:path}")
@@ -724,6 +948,13 @@ async def metrics_keys():
 async def get_events(limit: int = 50):
     events = await db.get_events(limit=limit)
     return {"events": events}
+
+@app.delete("/api/events")
+async def clear_events_route(current_user: dict = Depends(auth.get_current_user)):
+    if current_user.get("role") == "readonly":
+        raise HTTPException(status_code=403, detail="Readonly user")
+    await db.clear_events()
+    return {"ok": True}
 
 # ── Alert rules ───────────────────────────────────────────────────────────────
 @app.get("/api/alert-rules")
@@ -771,7 +1002,7 @@ async def portainer_stack_compose(stack_id: int):
         raise HTTPException(status_code=503, detail="Portainer not configured")
     headers = {"X-API-Key": token}
     try:
-        async with httpx.AsyncClient(base_url=url, verify=False, timeout=10, headers=headers) as c:
+        async with httpx.AsyncClient(base_url=url, verify=_SSL_VERIFY, timeout=10, headers=headers) as c:
             r = await c.get(f"/api/stacks/{stack_id}/file")
             if r.status_code != 200:
                 raise HTTPException(status_code=r.status_code, detail=f"Portainer error: {r.text[:200]}")
@@ -987,7 +1218,7 @@ async def pve_node_detail(node: str):
     else:
         # Use ticket auth — get ticket first
         try:
-            async with httpx.AsyncClient(base_url=pve_url, verify=False, timeout=10) as c:
+            async with httpx.AsyncClient(base_url=pve_url, verify=_SSL_VERIFY, timeout=10) as c:
                 tr = await c.post("/api2/json/access/ticket",
                                   data={"username": pve_user, "password": pve_pass})
                 td = tr.json().get("data", {})
@@ -998,7 +1229,7 @@ async def pve_node_detail(node: str):
             raise HTTPException(status_code=503, detail=str(e))
 
     try:
-        async with httpx.AsyncClient(base_url=pve_url, verify=False, timeout=10, headers=auth_header) as c:
+        async with httpx.AsyncClient(base_url=pve_url, verify=_SSL_VERIFY, timeout=10, headers=auth_header) as c:
             sr = await c.get(f"/api2/json/nodes/{node}/status")
             node_status = sr.json().get("data", {}) if sr.status_code == 200 else {}
             dr = await c.get(f"/api2/json/nodes/{node}/disks/list")
@@ -1157,12 +1388,6 @@ async def update_alert_rule(rule_id: int, body: AlertRuleRequest):
     )
     return {"ok": True}
 
-# ── Alert history ─────────────────────────────────────────────────────────────
-@app.get("/api/alert-history")
-async def get_alert_history(limit: int = 100):
-    entries = await db.get_alert_history(limit=limit)
-    return {"entries": entries}
-
 # ── Telegram configuration ────────────────────────────────────────────────────
 @app.get("/api/telegram/status")
 async def telegram_status():
@@ -1211,9 +1436,19 @@ async def telegram_register_chat(request: Request):
     await db.set_setting("tg_chat_id", chat_id)
     return {"ok": True}
 
+_tg_webhook_hits: dict[str, list[float]] = {}
+_TG_WEBHOOK_LIMIT = 30   # max requests per minute per IP
+
 @app.post("/api/telegram/webhook")
 async def telegram_webhook(request: Request):
     """Receive Telegram updates (messages + callback queries)."""
+    ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    hits = [t for t in _tg_webhook_hits.get(ip, []) if now - t < 60]
+    if len(hits) >= _TG_WEBHOOK_LIMIT:
+        return JSONResponse({"ok": False}, status_code=429)
+    hits.append(now)
+    _tg_webhook_hits[ip] = hits
     try:
         update = await request.json()
         asyncio.create_task(tgmod.handle_update(update))

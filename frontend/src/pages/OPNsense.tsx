@@ -167,12 +167,23 @@ export default function OPNsense({ onToast: _onToast }: Props) {
         </div>
     )
 
-    if (!sysinfo && !gateways.length) return (
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '60vh', color: 'var(--muted)', flexDirection: 'column', gap: 12 }}>
-            <i className="fa-solid fa-shield-halved" style={{ fontSize: 36, opacity: 0.3 }} />
-            <div>Configura OPNsense en Settings</div>
-        </div>
-    )
+    const _noData = (!sysinfo || !Object.keys((sysinfo as any)?.data ?? {}).length) && !gateways.length
+    if (_noData) {
+        const sysinfoErr: string | null = (sysinfo as any)?.error ?? null
+        const notCfg = !sysinfoErr || ((): boolean => {
+            const e = sysinfoErr.toLowerCase()
+            return e.includes('not configured') || e.includes('no configurado') || e.includes('credentials')
+        })()
+        return (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '60vh', color: 'var(--muted)', flexDirection: 'column', gap: 12 }}>
+                <i className="fa-solid fa-shield-halved" style={{ fontSize: 36, opacity: 0.3 }} />
+                {notCfg
+                    ? <div>Configura OPNsense en Settings</div>
+                    : <div style={{ color: 'var(--accent5)', fontSize: 13 }}>{sysinfoErr}</div>
+                }
+            </div>
+        )
+    }
 
     // ── Render ────────────────────────────────────────────────
 

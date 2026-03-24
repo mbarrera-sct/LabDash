@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- Background -->
+  <rect width="32" height="32" rx="7" fill="#0a0e1a"/>
+
+  <!-- Outer triangle edges (low opacity) -->
+  <!-- top → bottom-left -->
+  <line x1="16" y1="7" x2="7" y2="24" stroke="#63b3ed" stroke-width="1" stroke-opacity="0.3"/>
+  <!-- top → bottom-right -->
+  <line x1="16" y1="7" x2="25" y2="24" stroke="#b794f4" stroke-width="1" stroke-opacity="0.3"/>
+  <!-- bottom-left → bottom-right -->
+  <line x1="7" y1="24" x2="25" y2="24" stroke="#68d391" stroke-width="1" stroke-opacity="0.3"/>
+
+  <!-- Hub connectors (white, medium opacity) -->
+  <line x1="16" y1="7" x2="16" y2="17" stroke="white" stroke-width="1.5" stroke-opacity="0.5"/>
+  <line x1="7" y1="24" x2="16" y2="17" stroke="white" stroke-width="1.5" stroke-opacity="0.5"/>
+  <line x1="25" y1="24" x2="16" y2="17" stroke="white" stroke-width="1.5" stroke-opacity="0.5"/>
+
+  <!-- Center hub -->
+  <circle cx="16" cy="17" r="2.5" fill="#fbd38d"/>
+
+  <!-- Outer nodes -->
+  <circle cx="16" cy="7" r="3.5" fill="#63b3ed"/>
+  <circle cx="7" cy="24" r="3.5" fill="#68d391"/>
+  <circle cx="25" cy="24" r="3.5" fill="#b794f4"/>
+</svg>

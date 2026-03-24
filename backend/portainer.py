@@ -3,6 +3,8 @@ import time, os
 import httpx
 from db import get_setting
 
+_SSL_VERIFY = os.environ.get("SSL_VERIFY", "false").lower() in ("true", "1", "yes")
+
 _cache: dict = {"data": None, "ts": 0}
 TTL = 30
 
@@ -18,7 +20,7 @@ async def fetch() -> tuple[dict, str | None]:
             return _cache.get("data") or {}, "Portainer not configured"
 
         headers = {"X-API-Key": token}
-        async with httpx.AsyncClient(base_url=url, verify=False, timeout=10, headers=headers) as c:
+        async with httpx.AsyncClient(base_url=url, verify=_SSL_VERIFY, timeout=10, headers=headers) as c:
             ep_r = await c.get("/api/endpoints")
             endpoints = ep_r.json() if ep_r.status_code == 200 else []
 

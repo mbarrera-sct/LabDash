@@ -1,8 +1,71 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
-import { api } from '../api'
+import { useEffect, useState, useCallback, useRef, type ReactNode } from 'react'
+import { api, getToken } from '../api'
 import { fmtBytes, fmtUptime, fmtKbps } from '../utils/fmt'
 import { getNodeMeta } from '../constants/nodeTypes'
 import { Sparkline } from '../components/Sparkline'
+import {
+    DndContext,
+    closestCenter,
+    PointerSensor,
+    useSensor,
+    useSensors,
+    DragEndEvent,
+} from '@dnd-kit/core'
+import {
+    SortableContext,
+    useSortable,
+    rectSortingStrategy,
+    arrayMove,
+} from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
+import { GripVertical } from 'lucide-react'
+
+// ── SortableCard wrapper ───────────────────────────────────────────────────────
+function SortableCard({ id, children }: { id: string; children: ReactNode }) {
+    const {
+        attributes,
+        listeners,
+        setNodeRef,
+        transform,
+        transition,
+        isDragging,
+    } = useSortable({ id })
+
+    const style: React.CSSProperties = {
+        transform: CSS.Transform.toString(transform),
+        transition,
+        opacity: isDragging ? 0.5 : 1,
+        position: 'relative',
+    }
+
+    return (
+        <div ref={setNodeRef} style={style}>
+            <div
+                {...attributes}
+                {...listeners}
+                className="drag-handle"
+                title="Arrastrar para reordenar"
+                style={{
+                    position: 'absolute',
+                    top: 8,
+                    right: 8,
+                    zIndex: 10,
+                    cursor: 'grab',
+                    color: 'var(--muted)',
+                    opacity: 0,
+                    transition: 'opacity .15s',
+                    display: 'flex',
+                    alignItems: 'center',
+                    padding: 4,
+                    borderRadius: 4,
+                }}
+            >
+                <GripVertical size={14} />
+            </div>
+            {children}
+        </div>
+    )
+}
 
 interface Props { onToast: (t: 'success' | 'error', m: string) => void }
 
@@ -77,6 +140,14 @@ function sortVms(vms: any[], col: string, dir: 'asc' | 'desc') {
         if (typeof av === 'string') return dir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av)
         return dir === 'asc' ? av - bv : bv - av
     })
+}
+
+// ── Not-configured helper ─────────────────────────────────────────────────────
+
+function isNotConfigured(err: string | null | undefined): boolean {
+    if (!err) return false
+    const e = err.toLowerCase()
+    return e.includes('not configured') || e.includes('no configurado') || e.includes('credentials')
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -186,18 +257,22 @@ export default function Dashboard({ onToast }: Props) {
         })
     }
 
-    const moveCard = (key: string, direction: 'up' | 'down') => {
+    const handleDragEnd = (event: DragEndEvent) => {
+        const { active, over } = event
+        if (!over || active.id === over.id) return
         setCardOrder(prev => {
-            const idx = prev.indexOf(key)
-            if (idx < 0) return prev
-            const next = [...prev]
-            const target = direction === 'up' ? idx - 1 : idx + 1
-            if (target < 0 || target >= next.length) return prev
-            ;[next[idx], next[target]] = [next[target], next[idx]]
+            const oldIdx = prev.indexOf(String(active.id))
+            const newIdx = prev.indexOf(String(over.id))
+            if (oldIdx < 0 || newIdx < 0) return prev
+            const next = arrayMove(prev, oldIdx, newIdx)
             localStorage.setItem('labdash_card_order', JSON.stringify(next))
             return next
         })
     }
+
+    const dndSensors = useSensors(
+        useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
+    )
 
     const handleViewCompose = async (stackId: number, stackName: string) => {
         setComposeLoading(stackId)
@@ -210,6 +285,7 @@ export default function Dashboard({ onToast }: Props) {
     }
 
     const diagramRef = useRef<{ nodes: any[] }>({ nodes: [] })
+    const abortRef = useRef<AbortController | null>(null)
 
     // ── Data loaders ──────────────────────────────────────────
     const load = useCallback(async () => {
@@ -283,6 +359,50 @@ export default function Dashboard({ onToast }: Props) {
         } catch { }
     }, [])
 
+    // ── SSE connection for real-time events ───────────────────
+    const connectSSE = useCallback(() => {
+        const ac = new AbortController()
+        abortRef.current = ac
+        const token = getToken()
+        if (!token) return
+
+        fetch('/api/events/stream', {
+            headers: { Authorization: `Bearer ${token}` },
+            signal: ac.signal,
+        }).then(res => {
+            if (!res.ok || !res.body) throw new Error('SSE failed')
+            const reader = res.body.getReader()
+            const decoder = new TextDecoder()
+            let buf = ''
+
+            function read() {
+                reader.read().then(({ done, value }) => {
+                    if (done || ac.signal.aborted) return
+                    buf += decoder.decode(value, { stream: true })
+                    const lines = buf.split('\n')
+                    buf = lines.pop() ?? ''
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            try {
+                                const evt = JSON.parse(line.slice(6))
+                                setEvents(prev => {
+                                    if (prev.some(e => e.id === evt.id)) return prev
+                                    return [evt, ...prev].slice(0, 30)
+                                })
+                            } catch { }
+                        }
+                    }
+                    read()
+                }).catch(() => {
+                    if (!ac.signal.aborted) setTimeout(() => connectSSE(), 5000)
+                })
+            }
+            read()
+        }).catch(() => {
+            if (!ac.signal.aborted) setTimeout(() => connectSSE(), 5000)
+        })
+    }, [])
+
     useEffect(() => {
         api.portainerData().then(r => setPortainer(r)).catch(() => {})
         api.uptimeKumaMonitors().then(r => setUptimeKuma(r)).catch(() => {})
@@ -291,16 +411,21 @@ export default function Dashboard({ onToast }: Props) {
         api.tailscaleDevices().then(r => setTailscale(r)).catch(() => {})
         api.opnsenseWireguard().then(r => setWireguard(r)).catch(() => {})
         load(); loadSnmp(); loadOpnIfaces(); loadDhcp(); loadFwLog(); loadEvents(); loadMetrics()
-        const t1 = setInterval(load,       30000)
-        const t2 = setInterval(loadSnmp,   10000)
-        const t3 = setInterval(loadPing,   10000)
+        connectSSE()
+        const t1 = setInterval(load,          30000)
+        const t2 = setInterval(loadSnmp,      10000)
+        const t3 = setInterval(loadPing,      10000)
         const t4 = setInterval(loadOpnIfaces, 30000)
-        const t5 = setInterval(loadDhcp,   60000)
-        const t6 = setInterval(loadFwLog,  30000)
-        const t7 = setInterval(loadEvents, 15000)
-        const t8 = setInterval(loadMetrics, 60000)
-        return () => { clearInterval(t1); clearInterval(t2); clearInterval(t3); clearInterval(t4); clearInterval(t5); clearInterval(t6); clearInterval(t7); clearInterval(t8) }
-    }, [load, loadSnmp, loadPing, loadOpnIfaces, loadDhcp, loadFwLog, loadEvents, loadMetrics])
+        const t5 = setInterval(loadDhcp,      60000)
+        const t6 = setInterval(loadFwLog,     30000)
+        const t7 = setInterval(loadEvents,    15000) // fallback polling
+        const t8 = setInterval(loadMetrics,   60000)
+        return () => {
+            abortRef.current?.abort()
+            clearInterval(t1); clearInterval(t2); clearInterval(t3); clearInterval(t4)
+            clearInterval(t5); clearInterval(t6); clearInterval(t7); clearInterval(t8)
+        }
+    }, [load, loadSnmp, loadPing, loadOpnIfaces, loadDhcp, loadFwLog, loadEvents, loadMetrics, connectSSE])
 
     // Load node detail for each Proxmox node
     useEffect(() => {
@@ -441,28 +566,24 @@ export default function Dashboard({ onToast }: Props) {
                     {/* Services sub-section */}
                     <div>
                         <div style={{ fontSize: 10, color: 'var(--accent)', textTransform: 'uppercase', letterSpacing: '0.07em', fontWeight: 700, marginBottom: 8 }}>
-                            <i className="fa-solid fa-server" style={{ marginRight: 6 }} />Servicios — orden y visibilidad
+                            <i className="fa-solid fa-server" style={{ marginRight: 6 }} />Servicios — visibilidad
+                            <span style={{ color: 'var(--muted)', fontSize: 9, fontWeight: 400, marginLeft: 8, textTransform: 'none' }}>
+                                (arrastra las tarjetas para reordenar)
+                            </span>
                         </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                            {CARD_KEYS.map((k: string, idx: number) => (
-                                <div key={k} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                                        <button
-                                            onClick={() => moveCard(k, 'up')} disabled={idx === 0}
-                                            style={{ background: 'none', border: 'none', color: idx === 0 ? 'rgba(255,255,255,0.1)' : 'var(--muted)', cursor: idx === 0 ? 'default' : 'pointer', padding: '1px 4px', fontSize: 9, lineHeight: 1 }}
-                                            title="Subir"
-                                        >▲</button>
-                                        <button
-                                            onClick={() => moveCard(k, 'down')} disabled={idx === CARD_KEYS.length - 1}
-                                            style={{ background: 'none', border: 'none', color: idx === CARD_KEYS.length - 1 ? 'rgba(255,255,255,0.1)' : 'var(--muted)', cursor: idx === CARD_KEYS.length - 1 ? 'default' : 'pointer', padding: '1px 4px', fontSize: 9, lineHeight: 1 }}
-                                            title="Bajar"
-                                        >▼</button>
-                                    </div>
-                                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 12, color: visibleCards[k] ? 'var(--text)' : 'var(--muted)', flex: 1 }}>
-                                        <input type="checkbox" checked={visibleCards[k] ?? true} onChange={() => toggleCard(k)} style={{ cursor: 'pointer' }} />
-                                        {k.charAt(0).toUpperCase() + k.slice(1).replace('_', ' ')}
-                                    </label>
-                                </div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                            {CARD_KEYS.map((k: string) => (
+                                <label key={k} style={{
+                                    display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+                                    padding: '4px 10px', borderRadius: 8, fontSize: 12,
+                                    background: visibleCards[k] ?? true ? 'rgba(99,179,237,0.08)' : 'rgba(255,255,255,0.02)',
+                                    border: `1px solid ${visibleCards[k] ?? true ? 'rgba(99,179,237,0.25)' : 'var(--border)'}`,
+                                    color: visibleCards[k] ?? true ? 'var(--text)' : 'var(--muted)',
+                                    transition: 'all .15s',
+                                }}>
+                                    <input type="checkbox" checked={visibleCards[k] ?? true} onChange={() => toggleCard(k)} style={{ cursor: 'pointer' }} />
+                                    {k.charAt(0).toUpperCase() + k.slice(1).replace('_', ' ')}
+                                </label>
                             ))}
                         </div>
                     </div>
@@ -1309,316 +1430,372 @@ export default function Dashboard({ onToast }: Props) {
             <div className="sec-title" style={{ marginTop: 8, marginBottom: 16 }}>
                 <i className="fa-solid fa-server" /> Servicios
             </div>
-            <div className="g3" style={{ marginBottom: 32 }}>
-                {/* Plex */}
-                {(visibleCards['plex'] ?? true) && <div className="card">
-                    <div className="card-header">
-                        <div className="card-icon icon-yellow"><i className="fa-solid fa-film" /></div>
-                        <div>
-                            <div className="card-title">Plex Media Server</div>
-                            <div className="card-sub">{plex?.data?.server_name ?? 'Plex'} · {plex?.data?.version ?? '—'}</div>
-                        </div>
-                        <span className={`pill ${plex?.data?.server_name ? 'pill-green' : 'pill-red'}`} style={{ marginLeft: 'auto' }}>
-                            <span className={`dot ${plex?.data?.server_name ? 'dot-green' : 'dot-red'}`} />
-                            {plex?.data?.server_name ? 'Online' : 'Offline'}
-                        </span>
-                    </div>
-                    {plex?.data?.sessions > 0 && (
-                        <div className="kv-row">
-                            <span className="kv-key"><i className="fa-solid fa-play" style={{ marginRight: 5 }} />Streams activos</span>
-                            <span className="kv-val" style={{ color: '#68d391' }}>{plex.data.sessions}</span>
-                        </div>
-                    )}
-                    {plex?.data?.libraries?.map((lib: any) => {
-                        const icon = lib.type === 'movie' ? 'fa-film'
-                            : lib.type === 'show'  ? 'fa-tv'
-                            : lib.type === 'music' ? 'fa-music'
-                            : lib.type === 'photo' ? 'fa-image'
-                            : 'fa-folder'
-                        return (
-                            <div key={lib.key || lib.title} className="kv-row">
-                                <span className="kv-key">
-                                    <i className={`fa-solid ${icon}`} style={{ marginRight: 6, opacity: 0.6 }} />
-                                    {lib.title}
-                                </span>
-                                <span className="kv-val val-yellow">{lib.count?.toLocaleString() ?? 0}</span>
-                            </div>
-                        )
-                    })}
-                    {!plex?.data?.server_name && (
-                        <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>Configura Plex en Settings</div>
-                    )}
-                </div>}
-                {/* Immich */}
-                {(visibleCards['immich'] ?? true) && <div className="card">
-                    <div className="card-header">
-                        <div className="card-icon icon-purple"><i className="fa-solid fa-images" /></div>
-                        <div><div className="card-title">Immich</div><div className="card-sub">Galería fotográfica</div></div>
-                        <span className={`pill ${immich?.data ? 'pill-green' : 'pill-red'}`} style={{ marginLeft: 'auto' }}>
-                            <span className={`dot ${immich?.data ? 'dot-green' : 'dot-red'}`} /> {immich?.data ? 'Online' : 'Offline'}
-                        </span>
-                    </div>
-                    {immich?.data && <>
-                        <div className="kv-row"><span className="kv-key">Fotos</span><span className="kv-val val-purple">{immich.data.photos?.toLocaleString() ?? '—'}</span></div>
-                        <div className="kv-row"><span className="kv-key">Vídeos</span><span className="kv-val val-purple">{immich.data.videos?.toLocaleString() ?? '—'}</span></div>
-                        <div className="kv-row"><span className="kv-key">Almacenamiento</span><span className="kv-val val-blue">{fmtBytes(immich.data.usageByUser?.reduce((a: number, u: any) => a + (u.diskUsageRaw ?? 0), 0) ?? 0)}</span></div>
-                    </>}
-                    {!immich?.data && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>Configura Immich en Settings</div>}
-                </div>}
-                {/* Unraid */}
-                {(visibleCards['unraid'] ?? true) && <div className="card">
-                    <div className="card-header">
-                        <div className="card-icon icon-teal"><i className="fa-solid fa-database" /></div>
-                        <div><div className="card-title">Unraid / NAS</div><div className="card-sub">{unraid?.data?.version ?? 'Sin datos'}</div></div>
-                        <span className={`pill ${unraid?.data ? 'pill-green' : 'pill-red'}`} style={{ marginLeft: 'auto' }}>
-                            <span className={`dot ${unraid?.data ? 'dot-green' : 'dot-red'}`} /> {unraid?.data ? 'Online' : 'Offline'}
-                        </span>
-                    </div>
-                    {unraid?.data && <>
-                        <div className="kv-row"><span className="kv-key">Array</span><span className="kv-val val-green">{unraid.data.arrayStatus ?? '—'}</span></div>
-                        <div className="kv-row"><span className="kv-key">CPU</span><span className="kv-val val-yellow">{unraid.data.cpu ?? '—'}</span></div>
-                        <div className="kv-row"><span className="kv-key">RAM</span><span className="kv-val val-blue">{fmtBytes(unraid.data.memUsed ?? 0)} / {fmtBytes(unraid.data.memTotal ?? 0)}</span></div>
-                    </>}
-                    {/* Disk health */}
-                    {unraidDisks && !unraidDisks.error && (() => {
-                        const allDisks = [...(unraidDisks.parities ?? []), ...(unraidDisks.disks ?? [])]
-                        if (!allDisks.length) return null
-                        return <div style={{ marginTop: 10 }}>
-                            <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Discos</div>
-                            {allDisks.map((d: any) => {
-                                const smart = (d.smart || '').toLowerCase()
-                                const ok    = smart === 'passed' || smart === 'ok' || smart === ''
-                                const temp  = d.temp != null ? `${d.temp}°C` : '—'
-                                const errs  = d.errors > 0 ? ` · ${d.errors} err` : ''
-                                const color = d.errors > 0 ? 'var(--red)' : ok ? 'var(--green)' : 'var(--yellow)'
-                                return <div key={d.id} className="kv-row" style={{ fontSize: 12 }}>
-                                    <span className="kv-key" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                                        <i className={`fa-solid ${d.role === 'parity' ? 'fa-shield-halved' : 'fa-hard-drive'}`} style={{ fontSize: 10, color: 'var(--muted)' }} />
-                                        {d.name || d.device}
-                                    </span>
-                                    <span style={{ color, fontSize: 11 }}>{temp}{errs} {d.smart ? `· ${d.smart}` : ''}</span>
-                                </div>
-                            })}
-                        </div>
-                    })()}
-                    {!unraid?.data && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>Configura Unraid en Settings</div>}
-                </div>}
-                {/* Home Assistant */}
-                {(visibleCards['ha'] ?? true) && <div className="card">
-                    <div className="card-header">
-                        <div className="card-icon icon-blue"><i className="fa-solid fa-house-signal" /></div>
-                        <div><div className="card-title">Home Assistant</div><div className="card-sub">{haStates.length} entidades</div></div>
-                        <span className={`pill ${haStates.length > 0 ? 'pill-green' : 'pill-red'}`} style={{ marginLeft: 'auto' }}>
-                            <span className={`dot ${haStates.length > 0 ? 'dot-green' : 'dot-red'}`} /> {haStates.length > 0 ? 'Online' : 'Offline'}
-                        </span>
-                    </div>
-                    {haStates.slice(0, 6).map((e: any) => (
-                        <div key={e.entity_id} className="kv-row">
-                            <span className="kv-key" style={{ fontSize: 11 }}>{e.attributes?.friendly_name ?? e.entity_id.split('.')[1]}</span>
-                            <span className="kv-val" style={{ color: e.state === 'on' ? 'var(--accent2)' : e.state === 'off' ? 'var(--muted)' : 'var(--accent4)' }}>
-                                {e.state}{e.attributes?.unit_of_measurement ? ` ${e.attributes.unit_of_measurement}` : ''}
-                            </span>
-                        </div>
-                    ))}
-                    {haStates.length === 0 && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>Configura Home Assistant en Settings</div>}
-                </div>}
-                {/* Portainer */}
-                {(visibleCards['portainer'] ?? true) && <div className="card">
-                    <div className="card-header">
-                        <div className="card-icon icon-blue"><i className="fa-solid fa-cube" /></div>
-                        <div>
-                            <div className="card-title">Portainer</div>
-                            <div className="card-sub">
-                                {portainer?.data?.endpoints?.length
-                                    ? `${portainer.data.endpoints.length} endpoint${portainer.data.endpoints.length !== 1 ? 's' : ''}`
-                                    : 'Container management'}
-                            </div>
-                        </div>
-                        <span className={`pill ${portainer?.data?.endpoints?.length > 0 ? 'pill-green' : 'pill-red'}`} style={{ marginLeft: 'auto' }}>
-                            <span className={`dot ${portainer?.data?.endpoints?.length > 0 ? 'dot-green' : 'dot-red'}`} />
-                            {portainer?.data?.endpoints?.length > 0 ? 'Online' : 'Offline'}
-                        </span>
-                    </div>
-                    {portainer?.data?.stacks?.length > 0 && (
-                        <>
-                            <div className="kv-row">
-                                <span className="kv-key"><i className="fa-solid fa-layer-group" style={{ marginRight: 5 }} />Stacks</span>
-                                <span className="kv-val val-blue">{portainer.data.stacks.length}</span>
-                            </div>
-                            {portainer.data.stacks.slice(0, 6).map((st: any) => (
-                                <div key={st.id} className="kv-row" style={{ alignItems: 'center' }}>
-                                    <span className="kv-key" style={{ fontSize: 11 }}>
-                                        <span style={{
-                                            width: 6, height: 6, borderRadius: '50%', display: 'inline-block', marginRight: 5,
-                                            background: st.status === 1 ? '#68d391' : '#fc8181',
-                                        }} />
-                                        {st.name}
-                                    </span>
-                                    <button
-                                        onClick={() => handleViewCompose(st.id, st.name)}
-                                        disabled={composeLoading === st.id}
-                                        title="Ver docker-compose.yml"
-                                        style={{
-                                            background: 'none', border: '1px solid rgba(99,179,237,0.25)',
-                                            borderRadius: 5, color: '#63b3ed', cursor: 'pointer',
-                                            padding: '1px 7px', fontSize: 10,
-                                        }}
-                                    >
-                                        <i className={`fa-solid ${composeLoading === st.id ? 'fa-spinner fa-spin' : 'fa-file-code'}`} />
-                                    </button>
-                                </div>
-                            ))}
-                        </>
-                    )}
-                    {portainer?.data?.containers !== undefined && (
-                        <div className="kv-row">
-                            <span className="kv-key"><i className="fa-solid fa-box" style={{ marginRight: 5 }} />Contenedores running</span>
-                            <span className="kv-val val-green">
-                                {portainer.data.containers.filter((c: any) => c.state === 'running').length}
-                                <span style={{ color: 'var(--muted)', fontWeight: 400 }}>/{portainer.data.containers.length}</span>
-                            </span>
-                        </div>
-                    )}
-                    {portainer?.data?.endpoints?.map((ep: any) => (
-                        <div key={ep.id} className="kv-row">
-                            <span className="kv-key" style={{ fontSize: 11 }}>{ep.name}</span>
-                            <span className="kv-val" style={{ color: ep.status === 1 ? 'var(--accent2)' : 'var(--muted)', fontSize: 11 }}>
-                                {ep.status === 1 ? 'Active' : 'Inactive'}
-                            </span>
-                        </div>
-                    ))}
-                    {!portainer?.data?.endpoints && (
-                        <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>Configura Portainer en Settings</div>
-                    )}
-                </div>}
-                {/* Uptime Kuma */}
-                {(visibleCards['uptime_kuma'] ?? true) && <div className="card">
-                    <div className="card-header">
-                        <div className="card-icon icon-green"><i className="fa-solid fa-heart-pulse" /></div>
-                        <div>
-                            <div className="card-title">Uptime Kuma</div>
-                            <div className="card-sub">
-                                {uptimeKuma?.data?.total !== undefined
-                                    ? `${uptimeKuma.data.up}/${uptimeKuma.data.total} monitores activos`
-                                    : 'Monitor de servicios'}
-                            </div>
-                        </div>
-                        <span
-                            className={`pill ${uptimeKuma?.data?.total > 0 ? (uptimeKuma.data.up === uptimeKuma.data.total ? 'pill-green' : 'pill-yellow') : 'pill-red'}`}
-                            style={{ marginLeft: 'auto' }}
-                        >
-                            <span className={`dot ${uptimeKuma?.data?.total > 0 ? (uptimeKuma.data.up === uptimeKuma.data.total ? 'dot-green' : 'dot-yellow') : 'dot-red'}`} />
-                            {uptimeKuma?.data?.total > 0
-                                ? (uptimeKuma.data.up === uptimeKuma.data.total ? 'All Up' : `${uptimeKuma.data.total - uptimeKuma.data.up} Down`)
-                                : 'Offline'}
-                        </span>
-                    </div>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 8 }}>
-                        {uptimeKuma?.data?.monitors?.slice(0, 12).map((m: any) => (
-                            <span
-                                key={m.id}
-                                title={`${m.name}: ${m.status === 1 ? 'Up' : 'Down'} · ping: ${m.ping ?? '—'}ms · uptime 24h: ${m.uptime_24h}%`}
-                                style={{
-                                    display: 'inline-flex', alignItems: 'center', gap: 4,
-                                    padding: '2px 8px', borderRadius: 20, fontSize: 10.5,
-                                    background: m.status === 1 ? 'rgba(104,211,145,0.12)' : 'rgba(252,129,129,0.12)',
-                                    border: `1px solid ${m.status === 1 ? 'rgba(104,211,145,0.35)' : 'rgba(252,129,129,0.35)'}`,
-                                    color: m.status === 1 ? '#68d391' : '#fc8181',
-                                }}
-                            >
-                                <span style={{ width: 5, height: 5, borderRadius: '50%', background: m.status === 1 ? '#68d391' : '#fc8181', display: 'inline-block' }} />
-                                {m.name}
-                            </span>
-                        ))}
-                    </div>
-                    {!uptimeKuma?.data?.monitors && (
-                        <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>Configura Uptime Kuma en Settings</div>
-                    )}
-                </div>}
-                {/* Tailscale */}
-                {(visibleCards['tailscale'] ?? true) && <div className="card">
-                    <div className="card-header">
-                        <div className="card-icon" style={{ background: 'rgba(99,179,237,.15)', color: '#63b3ed' }}><i className="fa-solid fa-shield-halved" /></div>
-                        <div>
-                            <div className="card-title">Tailscale</div>
-                            <div className="card-sub">
-                                {tailscale?.data?.devices?.length != null
-                                    ? `${tailscale.data.devices.length} dispositivos · ${tailscale.data.tailnet}`
-                                    : 'VPN mesh'}
-                            </div>
-                        </div>
-                        <span className={`pill ${tailscale?.data?.devices?.length > 0 ? 'pill-green' : 'pill-red'}`} style={{ marginLeft: 'auto' }}>
-                            <span className={`dot ${tailscale?.data?.devices?.length > 0 ? 'dot-green' : 'dot-red'}`} />
-                            {tailscale?.data?.devices?.length > 0 ? 'Online' : 'Offline'}
-                        </span>
-                    </div>
-                    {tailscale?.data?.devices?.slice(0, 8).map((d: any) => (
-                        <div key={d.id} className="kv-row">
-                            <span className="kv-key" style={{ fontSize: 11 }}>
-                                <span style={{ width: 6, height: 6, borderRadius: '50%', background: d.online ? '#68d391' : '#4a5568', display: 'inline-block', marginRight: 5 }} />
-                                {d.name || d.display_name}
-                            </span>
-                            <span className="kv-val" style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 10.5, color: '#63b3ed' }}>
-                                {d.ip || '—'}
-                                {d.os && <span style={{ color: 'var(--muted)', marginLeft: 6 }}>{d.os}</span>}
-                            </span>
-                        </div>
-                    ))}
-                    {!tailscale?.data?.devices && (
-                        <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>Configura Tailscale en Settings</div>
-                    )}
-                </div>}
-                {/* WireGuard */}
-                {(visibleCards['wireguard'] ?? true) && (() => {
-                    const _wgC = wireguard?.data?.clients
-                    const _wgS = wireguard?.data?.servers
-                    const wgClients: any[] = Array.isArray(_wgC?.rows) ? _wgC.rows : Array.isArray(_wgC) ? _wgC : []
-                    const wgServers: any[] = Array.isArray(_wgS?.rows) ? _wgS.rows : Array.isArray(_wgS) ? _wgS : []
-                    const hasWg = wgClients.length > 0 || wgServers.length > 0
-                    return (
-                        <div className="card">
-                            <div className="card-header">
-                                <div className="card-icon" style={{ background: 'rgba(183,148,244,.15)', color: '#b794f4' }}><i className="fa-solid fa-lock" /></div>
-                                <div>
-                                    <div className="card-title">WireGuard</div>
-                                    <div className="card-sub">
-                                        {hasWg ? `${wgServers.length} servidores · ${wgClients.length} peers` : 'VPN tunnel'}
+            <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+                <SortableContext items={CARD_KEYS} strategy={rectSortingStrategy}>
+                    <div className="g3 sortable-cards-grid" style={{ marginBottom: 32 }}>
+                        {CARD_KEYS.map(cardKey => {
+                            if (!(visibleCards[cardKey] ?? true)) return null
+
+                            if (cardKey === 'plex') return (
+                                <SortableCard key="plex" id="plex">
+                                    <div className="card">
+                                        <div className="card-header">
+                                            <div className="card-icon icon-yellow"><i className="fa-solid fa-film" /></div>
+                                            <div>
+                                                <div className="card-title">Plex Media Server</div>
+                                                <div className="card-sub">{plex?.data?.server_name ?? 'Plex'} · {plex?.data?.version ?? '—'}</div>
+                                            </div>
+                                            {plex?.data?.server_name
+                                                ? <span className="pill pill-green" style={{ marginLeft: 'auto' }}><span className="dot dot-green" /> Online</span>
+                                                : isNotConfigured(plex?.error)
+                                                    ? <span style={{ color: 'var(--muted)', fontSize: 12, marginLeft: 'auto' }}>—</span>
+                                                    : <span className="pill pill-red" style={{ marginLeft: 'auto' }}><span className="dot dot-red" /> Offline</span>
+                                            }
+                                        </div>
+                                        {plex?.data?.sessions > 0 && (
+                                            <div className="kv-row">
+                                                <span className="kv-key"><i className="fa-solid fa-play" style={{ marginRight: 5 }} />Streams activos</span>
+                                                <span className="kv-val" style={{ color: '#68d391' }}>{plex.data.sessions}</span>
+                                            </div>
+                                        )}
+                                        {plex?.data?.libraries?.map((lib: any) => {
+                                            const icon = lib.type === 'movie' ? 'fa-film'
+                                                : lib.type === 'show'  ? 'fa-tv'
+                                                : lib.type === 'music' ? 'fa-music'
+                                                : lib.type === 'photo' ? 'fa-image'
+                                                : 'fa-folder'
+                                            return (
+                                                <div key={lib.key || lib.title} className="kv-row">
+                                                    <span className="kv-key">
+                                                        <i className={`fa-solid ${icon}`} style={{ marginRight: 6, opacity: 0.6 }} />
+                                                        {lib.title}
+                                                    </span>
+                                                    <span className="kv-val val-yellow">{lib.count?.toLocaleString() ?? 0}</span>
+                                                </div>
+                                            )
+                                        })}
+                                        {!plex?.data?.server_name && (
+                                            <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>Configura Plex en Settings</div>
+                                        )}
                                     </div>
-                                </div>
-                                <span className={`pill ${hasWg ? 'pill-green' : 'pill-red'}`} style={{ marginLeft: 'auto' }}>
-                                    <span className={`dot ${hasWg ? 'dot-green' : 'dot-red'}`} />
-                                    {hasWg ? 'Activo' : 'Offline'}
-                                </span>
-                            </div>
-                            {wgServers.slice(0, 3).map((s: any, i: number) => (
-                                <div key={i} className="kv-row">
-                                    <span className="kv-key" style={{ fontSize: 11 }}>
-                                        <i className="fa-solid fa-server" style={{ marginRight: 5, opacity: 0.6 }} />
-                                        {s.name || s.description || `Server ${i + 1}`}
-                                    </span>
-                                    <span className="kv-val" style={{ color: '#b794f4', fontSize: 10.5 }}>
-                                        {s.enabled === '1' || s.enabled === true ? 'Activo' : 'Inactivo'}
-                                    </span>
-                                </div>
-                            ))}
-                            {wgClients.slice(0, 5).map((c: any, i: number) => (
-                                <div key={i} className="kv-row">
-                                    <span className="kv-key" style={{ fontSize: 11 }}>
-                                        <i className="fa-solid fa-user" style={{ marginRight: 5, opacity: 0.6 }} />
-                                        {c.name || c.description || `Peer ${i + 1}`}
-                                    </span>
-                                    <span className="kv-val" style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 10, color: 'var(--muted)' }}>
-                                        {c.tunnel_address || c.allowed_ips || '—'}
-                                    </span>
-                                </div>
-                            ))}
-                            {!hasWg && (
-                                <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>Configura OPNsense WireGuard en Settings</div>
-                            )}
-                        </div>
-                    )
-                })()}
-            </div>
+                                </SortableCard>
+                            )
+
+                            if (cardKey === 'immich') return (
+                                <SortableCard key="immich" id="immich">
+                                    <div className="card">
+                                        <div className="card-header">
+                                            <div className="card-icon icon-purple"><i className="fa-solid fa-images" /></div>
+                                            <div><div className="card-title">Immich</div><div className="card-sub">Galería fotográfica</div></div>
+                                            {immich?.data && !immich?.error
+                                                ? <span className="pill pill-green" style={{ marginLeft: 'auto' }}><span className="dot dot-green" /> Online</span>
+                                                : isNotConfigured(immich?.error)
+                                                    ? <span style={{ color: 'var(--muted)', fontSize: 12, marginLeft: 'auto' }}>—</span>
+                                                    : <span className="pill pill-red" style={{ marginLeft: 'auto' }}><span className="dot dot-red" /> Offline</span>
+                                            }
+                                        </div>
+                                        {immich?.data && !immich?.error && <>
+                                            <div className="kv-row"><span className="kv-key">Fotos</span><span className="kv-val val-purple">{immich.data.photos?.toLocaleString() ?? '—'}</span></div>
+                                            <div className="kv-row"><span className="kv-key">Vídeos</span><span className="kv-val val-purple">{immich.data.videos?.toLocaleString() ?? '—'}</span></div>
+                                            <div className="kv-row"><span className="kv-key">Almacenamiento</span><span className="kv-val val-blue">{fmtBytes(immich.data.usage ?? 0)}</span></div>
+                                            <div className="kv-row"><span className="kv-key">Usuarios</span><span className="kv-val">{immich.data.usageByUser?.length ?? '—'}</span></div>
+                                        </>}
+                                        {(!immich?.data || immich?.error) && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>Configura Immich en Settings</div>}
+                                    </div>
+                                </SortableCard>
+                            )
+
+                            if (cardKey === 'unraid') return (
+                                <SortableCard key="unraid" id="unraid">
+                                    <div className="card">
+                                        <div className="card-header">
+                                            <div className="card-icon icon-teal"><i className="fa-solid fa-database" /></div>
+                                            <div><div className="card-title">Unraid / NAS</div><div className="card-sub">{unraid?.data?.version ?? 'Sin datos'}</div></div>
+                                            <span className={`pill ${unraid?.data && !unraid?.error ? 'pill-green' : 'pill-red'}`} style={{ marginLeft: 'auto' }}>
+                                                <span className={`dot ${unraid?.data && !unraid?.error ? 'dot-green' : 'dot-red'}`} /> {unraid?.data && !unraid?.error ? 'Online' : 'Offline'}
+                                            </span>
+                                        </div>
+                                        {unraid?.data && !unraid?.error && <>
+                                            <div className="kv-row"><span className="kv-key">Array</span><span className="kv-val val-green">{unraid.data.array_status ?? '—'}</span></div>
+                                            <div className="kv-row"><span className="kv-key">CPU</span><span className="kv-val val-yellow">{unraid.data.cpu_model ?? '—'}</span></div>
+                                            <div className="kv-row"><span className="kv-key">RAM</span><span className="kv-val val-blue">{fmtBytes(unraid.data.mem_total ?? 0)}</span></div>
+                                        </>}
+                                        {unraidDisks && !unraidDisks.error && (() => {
+                                            const allDisks = [...(unraidDisks.parities ?? []), ...(unraidDisks.disks ?? [])]
+                                            if (!allDisks.length) return null
+                                            return <div style={{ marginTop: 10 }}>
+                                                <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Discos</div>
+                                                {allDisks.map((d: any) => {
+                                                    const smart = (d.smart || '').toLowerCase()
+                                                    const ok    = smart === 'passed' || smart === 'ok' || smart === ''
+                                                    const temp  = d.temp != null ? `${d.temp}°C` : '—'
+                                                    const errs  = d.errors > 0 ? ` · ${d.errors} err` : ''
+                                                    const color = d.errors > 0 ? 'var(--red)' : ok ? 'var(--green)' : 'var(--yellow)'
+                                                    return <div key={d.id} className="kv-row" style={{ fontSize: 12 }}>
+                                                        <span className="kv-key" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                                                            <i className={`fa-solid ${d.role === 'parity' ? 'fa-shield-halved' : 'fa-hard-drive'}`} style={{ fontSize: 10, color: 'var(--muted)' }} />
+                                                            {d.name || d.device}
+                                                        </span>
+                                                        <span style={{ color, fontSize: 11 }}>{temp}{errs} {d.smart ? `· ${d.smart}` : ''}</span>
+                                                    </div>
+                                                })}
+                                            </div>
+                                        })()}
+                                        {!unraid?.data && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>Configura Unraid en Settings</div>}
+                                    </div>
+                                </SortableCard>
+                            )
+
+                            if (cardKey === 'ha') return (
+                                <SortableCard key="ha" id="ha">
+                                    <div className="card">
+                                        <div className="card-header">
+                                            <div className="card-icon icon-blue"><i className="fa-solid fa-house-signal" /></div>
+                                            <div><div className="card-title">Home Assistant</div><div className="card-sub">{haStates.length} entidades</div></div>
+                                            {haStates.length > 0
+                                                ? <span className="pill pill-green" style={{ marginLeft: 'auto' }}><span className="dot dot-green" /> Online</span>
+                                                : isNotConfigured(ha?.error)
+                                                    ? <span style={{ color: 'var(--muted)', fontSize: 12, marginLeft: 'auto' }}>—</span>
+                                                    : <span className="pill pill-red" style={{ marginLeft: 'auto' }}><span className="dot dot-red" /> Offline</span>
+                                            }
+                                        </div>
+                                        {haStates.slice(0, 6).map((e: any) => (
+                                            <div key={e.entity_id} className="kv-row" style={{ overflow: 'hidden' }}>
+                                                <span className="kv-key" style={{ fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, flex: 1 }}>
+                                                    {e.attributes?.friendly_name ?? e.entity_id.split('.')[1]}
+                                                </span>
+                                                <span className="kv-val" style={{ color: e.state === 'on' ? 'var(--accent2)' : e.state === 'off' ? 'var(--muted)' : 'var(--accent4)', flexShrink: 0, marginLeft: 8 }}>
+                                                    {e.state}{e.attributes?.unit_of_measurement ? ` ${e.attributes.unit_of_measurement}` : ''}
+                                                </span>
+                                            </div>
+                                        ))}
+                                        {haStates.length === 0 && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>Configura Home Assistant en Settings</div>}
+                                    </div>
+                                </SortableCard>
+                            )
+
+                            if (cardKey === 'portainer') return (
+                                <SortableCard key="portainer" id="portainer">
+                                    <div className="card">
+                                        <div className="card-header">
+                                            <div className="card-icon icon-blue"><i className="fa-solid fa-cube" /></div>
+                                            <div>
+                                                <div className="card-title">Portainer</div>
+                                                <div className="card-sub">
+                                                    {portainer?.data?.endpoints?.length
+                                                        ? `${portainer.data.endpoints.length} endpoint${portainer.data.endpoints.length !== 1 ? 's' : ''}`
+                                                        : 'Container management'}
+                                                </div>
+                                            </div>
+                                            {portainer?.data?.endpoints?.length > 0
+                                                ? <span className="pill pill-green" style={{ marginLeft: 'auto' }}><span className="dot dot-green" /> Online</span>
+                                                : isNotConfigured(portainer?.error)
+                                                    ? <span style={{ color: 'var(--muted)', fontSize: 12, marginLeft: 'auto' }}>—</span>
+                                                    : <span className="pill pill-red" style={{ marginLeft: 'auto' }}><span className="dot dot-red" /> Offline</span>
+                                            }
+                                        </div>
+                                        {portainer?.data?.stacks?.length > 0 && (
+                                            <>
+                                                <div className="kv-row">
+                                                    <span className="kv-key"><i className="fa-solid fa-layer-group" style={{ marginRight: 5 }} />Stacks</span>
+                                                    <span className="kv-val val-blue">{portainer.data.stacks.length}</span>
+                                                </div>
+                                                {portainer.data.stacks.slice(0, 6).map((st: any) => (
+                                                    <div key={st.id} className="kv-row" style={{ alignItems: 'center' }}>
+                                                        <span className="kv-key" style={{ fontSize: 11 }}>
+                                                            <span style={{
+                                                                width: 6, height: 6, borderRadius: '50%', display: 'inline-block', marginRight: 5,
+                                                                background: st.status === 1 ? '#68d391' : '#fc8181',
+                                                            }} />
+                                                            {st.name}
+                                                        </span>
+                                                        <button
+                                                            onClick={() => handleViewCompose(st.id, st.name)}
+                                                            disabled={composeLoading === st.id}
+                                                            title="Ver docker-compose.yml"
+                                                            style={{
+                                                                background: 'none', border: '1px solid rgba(99,179,237,0.25)',
+                                                                borderRadius: 5, color: '#63b3ed', cursor: 'pointer',
+                                                                padding: '1px 7px', fontSize: 10,
+                                                            }}
+                                                        >
+                                                            <i className={`fa-solid ${composeLoading === st.id ? 'fa-spinner fa-spin' : 'fa-file-code'}`} />
+                                                        </button>
+                                                    </div>
+                                                ))}
+                                            </>
+                                        )}
+                                        {portainer?.data?.containers !== undefined && (
+                                            <div className="kv-row">
+                                                <span className="kv-key"><i className="fa-solid fa-box" style={{ marginRight: 5 }} />Contenedores running</span>
+                                                <span className="kv-val val-green">
+                                                    {portainer.data.containers.filter((c: any) => c.state === 'running').length}
+                                                    <span style={{ color: 'var(--muted)', fontWeight: 400 }}>/{portainer.data.containers.length}</span>
+                                                </span>
+                                            </div>
+                                        )}
+                                        {portainer?.data?.endpoints?.map((ep: any) => (
+                                            <div key={ep.id} className="kv-row">
+                                                <span className="kv-key" style={{ fontSize: 11 }}>{ep.name}</span>
+                                                <span className="kv-val" style={{ color: ep.status === 1 ? 'var(--accent2)' : 'var(--muted)', fontSize: 11 }}>
+                                                    {ep.status === 1 ? 'Active' : 'Inactive'}
+                                                </span>
+                                            </div>
+                                        ))}
+                                        {!portainer?.data?.endpoints && (
+                                            <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>Configura Portainer en Settings</div>
+                                        )}
+                                    </div>
+                                </SortableCard>
+                            )
+
+                            if (cardKey === 'uptime_kuma') return (
+                                <SortableCard key="uptime_kuma" id="uptime_kuma">
+                                    <div className="card">
+                                        <div className="card-header">
+                                            <div className="card-icon icon-green"><i className="fa-solid fa-heart-pulse" /></div>
+                                            <div>
+                                                <div className="card-title">Uptime Kuma</div>
+                                                <div className="card-sub">
+                                                    {uptimeKuma?.data?.total !== undefined
+                                                        ? `${uptimeKuma.data.up}/${uptimeKuma.data.total} monitores activos`
+                                                        : 'Monitor de servicios'}
+                                                </div>
+                                            </div>
+                                            {uptimeKuma?.data?.total > 0
+                                                ? (
+                                                    <span
+                                                        className={`pill ${uptimeKuma.data.up === uptimeKuma.data.total ? 'pill-green' : 'pill-yellow'}`}
+                                                        style={{ marginLeft: 'auto' }}
+                                                    >
+                                                        <span className={`dot ${uptimeKuma.data.up === uptimeKuma.data.total ? 'dot-green' : 'dot-yellow'}`} />
+                                                        {uptimeKuma.data.up === uptimeKuma.data.total ? 'All Up' : `${uptimeKuma.data.total - uptimeKuma.data.up} Down`}
+                                                    </span>
+                                                )
+                                                : isNotConfigured(uptimeKuma?.error)
+                                                    ? <span style={{ color: 'var(--muted)', fontSize: 12, marginLeft: 'auto' }}>—</span>
+                                                    : <span className="pill pill-red" style={{ marginLeft: 'auto' }}><span className="dot dot-red" /> Offline</span>
+                                            }
+                                        </div>
+                                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 8 }}>
+                                            {uptimeKuma?.data?.monitors?.slice(0, 12).map((m: any) => (
+                                                <span
+                                                    key={m.id}
+                                                    title={`${m.name}: ${m.status === 1 ? 'Up' : 'Down'} · ping: ${m.ping ?? '—'}ms · uptime 24h: ${m.uptime_24h}%`}
+                                                    style={{
+                                                        display: 'inline-flex', alignItems: 'center', gap: 4,
+                                                        padding: '2px 8px', borderRadius: 20, fontSize: 10.5,
+                                                        background: m.status === 1 ? 'rgba(104,211,145,0.12)' : 'rgba(252,129,129,0.12)',
+                                                        border: `1px solid ${m.status === 1 ? 'rgba(104,211,145,0.35)' : 'rgba(252,129,129,0.35)'}`,
+                                                        color: m.status === 1 ? '#68d391' : '#fc8181',
+                                                    }}
+                                                >
+                                                    <span style={{ width: 5, height: 5, borderRadius: '50%', background: m.status === 1 ? '#68d391' : '#fc8181', display: 'inline-block' }} />
+                                                    {m.name}
+                                                </span>
+                                            ))}
+                                        </div>
+                                        {!uptimeKuma?.data?.monitors && (
+                                            <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>Configura Uptime Kuma en Settings</div>
+                                        )}
+                                    </div>
+                                </SortableCard>
+                            )
+
+                            if (cardKey === 'tailscale') return (
+                                <SortableCard key="tailscale" id="tailscale">
+                                    <div className="card">
+                                        <div className="card-header">
+                                            <div className="card-icon" style={{ background: 'rgba(99,179,237,.15)', color: '#63b3ed' }}><i className="fa-solid fa-shield-halved" /></div>
+                                            <div>
+                                                <div className="card-title">Tailscale</div>
+                                                <div className="card-sub">
+                                                    {tailscale?.data?.devices?.length != null
+                                                        ? `${tailscale.data.devices.length} dispositivos · ${tailscale.data.tailnet}`
+                                                        : 'VPN mesh'}
+                                                </div>
+                                            </div>
+                                            <span className={`pill ${tailscale?.data?.devices?.length > 0 ? 'pill-green' : 'pill-red'}`} style={{ marginLeft: 'auto' }}>
+                                                <span className={`dot ${tailscale?.data?.devices?.length > 0 ? 'dot-green' : 'dot-red'}`} />
+                                                {tailscale?.data?.devices?.length > 0 ? 'Online' : 'Offline'}
+                                            </span>
+                                        </div>
+                                        {tailscale?.data?.devices?.slice(0, 8).map((d: any) => (
+                                            <div key={d.id} className="kv-row">
+                                                <span className="kv-key" style={{ fontSize: 11 }}>
+                                                    <span style={{ width: 6, height: 6, borderRadius: '50%', background: d.online ? '#68d391' : '#4a5568', display: 'inline-block', marginRight: 5 }} />
+                                                    {d.name || d.display_name}
+                                                </span>
+                                                <span className="kv-val" style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 10.5, color: '#63b3ed' }}>
+                                                    {d.ip || '—'}
+                                                    {d.os && <span style={{ color: 'var(--muted)', marginLeft: 6 }}>{d.os}</span>}
+                                                </span>
+                                            </div>
+                                        ))}
+                                        {!tailscale?.data?.devices && (
+                                            <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>Configura Tailscale en Settings</div>
+                                        )}
+                                    </div>
+                                </SortableCard>
+                            )
+
+                            if (cardKey === 'wireguard') {
+                                const _wgC = wireguard?.data?.clients
+                                const _wgS = wireguard?.data?.servers
+                                const wgClients: any[] = Array.isArray(_wgC?.rows) ? _wgC.rows : Array.isArray(_wgC) ? _wgC : []
+                                const wgServers: any[] = Array.isArray(_wgS?.rows) ? _wgS.rows : Array.isArray(_wgS) ? _wgS : []
+                                const hasWg = wgClients.length > 0 || wgServers.length > 0
+                                return (
+                                    <SortableCard key="wireguard" id="wireguard">
+                                        <div className="card">
+                                            <div className="card-header">
+                                                <div className="card-icon" style={{ background: 'rgba(183,148,244,.15)', color: '#b794f4' }}><i className="fa-solid fa-lock" /></div>
+                                                <div>
+                                                    <div className="card-title">WireGuard</div>
+                                                    <div className="card-sub">
+                                                        {hasWg ? `${wgServers.length} servidores · ${wgClients.length} peers` : 'VPN tunnel'}
+                                                    </div>
+                                                </div>
+                                                <span className={`pill ${hasWg ? 'pill-green' : 'pill-red'}`} style={{ marginLeft: 'auto' }}>
+                                                    <span className={`dot ${hasWg ? 'dot-green' : 'dot-red'}`} />
+                                                    {hasWg ? 'Activo' : 'Offline'}
+                                                </span>
+                                            </div>
+                                            {wgServers.slice(0, 3).map((s: any, i: number) => (
+                                                <div key={i} className="kv-row">
+                                                    <span className="kv-key" style={{ fontSize: 11 }}>
+                                                        <i className="fa-solid fa-server" style={{ marginRight: 5, opacity: 0.6 }} />
+                                                        {s.name || s.description || `Server ${i + 1}`}
+                                                    </span>
+                                                    <span className="kv-val" style={{ color: '#b794f4', fontSize: 10.5 }}>
+                                                        {s.enabled === '1' || s.enabled === true ? 'Activo' : 'Inactivo'}
+                                                    </span>
+                                                </div>
+                                            ))}
+                                            {wgClients.slice(0, 5).map((c: any, i: number) => (
+                                                <div key={i} className="kv-row">
+                                                    <span className="kv-key" style={{ fontSize: 11 }}>
+                                                        <i className="fa-solid fa-user" style={{ marginRight: 5, opacity: 0.6 }} />
+                                                        {c.name || c.description || `Peer ${i + 1}`}
+                                                    </span>
+                                                    <span className="kv-val" style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 10, color: 'var(--muted)' }}>
+                                                        {c.tunnel_address || c.allowed_ips || '—'}
+                                                    </span>
+                                                </div>
+                                            ))}
+                                            {!hasWg && (
+                                                <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>Configura OPNsense WireGuard en Settings</div>
+                                            )}
+                                        </div>
+                                    </SortableCard>
+                                )
+                            }
+
+                            return null
+                        })}
+                    </div>
+                </SortableContext>
+            </DndContext>
 
             {/* ── Compose viewer modal ── */}
             {composeModal && (

@@ -46,33 +46,50 @@ class ErrorBoundary extends Component<{ children: ReactNode }, EBState> {
 import SetupWizard from './pages/SetupWizard'
 import Dashboard from './pages/Dashboard'
 import Network from './pages/Network'
-import Services from './pages/Services'
 import Settings from './pages/Settings'
 import Notifications from './pages/Notifications'
 import Login from './pages/Login'
 import ProxmoxPage from './pages/Proxmox'
 import OPNsensePage from './pages/OPNsense'
 import UnraidPage from './pages/Unraid'
+import SwitchPage from './pages/Switch'
+import PlexPage from './pages/PlexPage'
+import ImmichPage from './pages/ImmichPage'
+import HomeAssistantPage from './pages/HomeAssistantPage'
+import PortainerPage from './pages/PortainerPage'
+import UptimeKumaPage from './pages/UptimeKumaPage'
 import { GlobalSearch } from './components/GlobalSearch'
 import { authApi, api, type CurrentUser, clearToken, setToken as storeToken } from './api'
 
-type Tab = 'dashboard' | 'network' | 'proxmox' | 'opnsense' | 'unraid' | 'services' | 'notifications' | 'settings'
+type Tab = 'dashboard' | 'network' | 'proxmox' | 'opnsense' | 'unraid' | 'switch'
+         | 'plex' | 'immich' | 'homeassistant' | 'portainer' | 'uptime_kuma'
+         | 'notifications' | 'settings'
 type AuthState = 'checking' | 'unauthenticated' | 'authenticated'
 
 interface Toast { id: number; type: 'success' | 'error'; msg: string }
 
-const TOKEN_KEY = 'labdash_token'
-
-const tabs: { id: Tab; icon: string; label: string }[] = [
-    { id: 'dashboard',     icon: 'fa-gauge-high',      label: 'Dashboard'      },
-    { id: 'proxmox',       icon: 'fa-cubes',            label: 'Proxmox'        },
-    { id: 'opnsense',      icon: 'fa-shield-halved',    label: 'OPNsense'       },
-    { id: 'unraid',        icon: 'fa-hard-drive',       label: 'Unraid'         },
-    { id: 'network',       icon: 'fa-diagram-project',  label: 'Network'        },
-    { id: 'services',      icon: 'fa-server',           label: 'Services'       },
-    { id: 'notifications', icon: 'fa-bell',             label: 'Notificaciones' },
-    { id: 'settings',      icon: 'fa-sliders',          label: 'Settings'       },
+// Fixed tabs always visible
+const FIXED_TABS: { id: Tab; icon: string; label: string }[] = [
+    { id: 'dashboard',     icon: 'fa-gauge-high',     label: 'Dashboard'      },
+    { id: 'network',       icon: 'fa-diagram-project', label: 'Network'        },
+    { id: 'notifications', icon: 'fa-bell',            label: 'Notificaciones' },
+    { id: 'settings',      icon: 'fa-sliders',         label: 'Settings'       },
 ]
+
+// Conditional tabs — only shown when the service has a URL configured
+const SERVICE_TABS: { id: Tab; icon: string; label: string; settingKey: string }[] = [
+    { id: 'proxmox',      icon: 'fa-cubes',           label: 'Proxmox',       settingKey: 'pve_url'          },
+    { id: 'opnsense',     icon: 'fa-shield-halved',   label: 'OPNsense',      settingKey: 'opn_url'          },
+    { id: 'unraid',       icon: 'fa-hard-drive',      label: 'Unraid',        settingKey: 'unraid_url'       },
+    { id: 'switch',       icon: 'fa-ethernet',        label: 'Switch',        settingKey: 'snmp_targets'     },
+    { id: 'plex',         icon: 'fa-film',            label: 'Plex',          settingKey: 'plex_url'         },
+    { id: 'immich',       icon: 'fa-images',          label: 'Immich',        settingKey: 'immich_url'       },
+    { id: 'homeassistant',icon: 'fa-house',           label: 'Home Assistant',settingKey: 'ha_url'           },
+    { id: 'portainer',    icon: 'fa-brands fa-docker',label: 'Portainer',     settingKey: 'portainer_url'    },
+    { id: 'uptime_kuma',  icon: 'fa-heart-pulse',     label: 'Uptime Kuma',   settingKey: 'uptime_kuma_url'  },
+]
+
+const TOKEN_KEY = 'labdash_token'
 
 // Attach token to every API request
 function setAuthHeaders(token: string | null) {
@@ -94,7 +111,10 @@ export default function App() {
     const [toasts, setToasts] = useState<Toast[]>([])
     const [lightMode, setLightMode] = useState(() => localStorage.getItem('labdash_theme') === 'light')
     const [needsSetup, setNeedsSetup] = useState(false)
+    const [maintenanceOn, setMaintenanceOn] = useState(false)
     const [searchOpen, setSearchOpen] = useState(false)
+    const [configuredServices, setConfiguredServices] = useState<Set<string>>(new Set())
+    const [appName, setAppName] = useState('LabDash')
     const [searchData, setSearchData] = useState<{
         pvNodes: any[]; pvVMs: Record<string, any[]>;
         opnGateways: any[]; k8sNodes: any[]; unraidDisks: any[];
@@ -167,12 +187,36 @@ export default function App() {
         } catch { }
     }, [])
 
+    const loadConfiguredServices = useCallback(async () => {
+        try {
+            const s = await api.getSettings()
+            const keys = new Set<string>()
+            for (const tab of SERVICE_TABS) {
+                const val = (s as any)[tab.settingKey]
+                if (val && val !== '***') keys.add(tab.settingKey)
+            }
+            setConfiguredServices(keys)
+            // Refresh app name in case it was changed in Settings
+            const name = (s as any).app_name
+            if (name) { setAppName(name); document.title = `${name} — Infrastructure Dashboard` }
+        } catch { }
+    }, [])
+
+    useEffect(() => {
+        api.getAppConfig().then(r => {
+            setAppName(r.app_name || 'LabDash')
+            document.title = `${r.app_name || 'LabDash'} — Infrastructure Dashboard`
+        }).catch(() => {})
+    }, [])
+
     useEffect(() => {
         if (authState === 'authenticated') {
             loadSearchData()
+            loadConfiguredServices()
             api.setupStatus().then(r => setNeedsSetup(r.needs_setup)).catch(() => {})
+            api.maintenanceStatus().then(r => setMaintenanceOn(r.enabled)).catch(() => {})
         }
-    }, [authState, loadSearchData])
+    }, [authState, loadSearchData, loadConfiguredServices])
 
     const handleLoginSuccess = (newToken: string) => {
         storeToken(newToken)
@@ -240,9 +284,9 @@ export default function App() {
             {/* Header */}
             <header className="header">
                 <div className="header-brand">
-                    <i className="fa-solid fa-network-wired" style={{ color: 'var(--accent)', fontSize: 22 }} />
+                    <img src="/favicon.svg" alt="LabDash" style={{ width: 32, height: 32, flexShrink: 0 }} />
                     <div>
-                        <span className="header-title">MXHOME</span>
+                        <span className="header-title">{appName}</span>
                         <span style={{ fontSize: 11, color: 'var(--muted)', display: 'block', lineHeight: 1 }}>
                             Home Lab Infrastructure Dashboard
                         </span>
@@ -250,19 +294,45 @@ export default function App() {
                 </div>
 
                 <nav className="header-nav">
-                    {tabs.map(t => (
-                        <button
-                            key={t.id}
-                            className={`nav-btn ${tab === t.id ? 'active' : ''}`}
-                            onClick={() => setTab(t.id)}
-                        >
-                            <i className={`fa-solid ${t.icon}`} />
-                            {t.label}
+                    {/* Dashboard always first */}
+                    {FIXED_TABS.filter(t => t.id === 'dashboard').map(t => (
+                        <button key={t.id} className={`nav-btn ${tab === t.id ? 'active' : ''}`} onClick={() => setTab(t.id)}>
+                            <i className={`fa-solid ${t.icon}`} />{t.label}
+                        </button>
+                    ))}
+                    {/* Service tabs — only if configured */}
+                    {SERVICE_TABS.filter(t => configuredServices.has(t.settingKey)).map(t => (
+                        <button key={t.id} className={`nav-btn ${tab === t.id ? 'active' : ''}`} onClick={() => setTab(t.id)}>
+                            <i className={`${t.icon.startsWith('fa-brands') ? t.icon : `fa-solid ${t.icon}`}`} />{t.label}
+                        </button>
+                    ))}
+                    {/* Fixed tabs at end */}
+                    {FIXED_TABS.filter(t => t.id !== 'dashboard').map(t => (
+                        <button key={t.id} className={`nav-btn ${tab === t.id ? 'active' : ''}`} onClick={() => setTab(t.id)}>
+                            <i className={`fa-solid ${t.icon}`} />{t.label}
                         </button>
                     ))}
                 </nav>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    {/* Maintenance mode indicator */}
+                    {maintenanceOn && (
+                        <button
+                            onClick={() => setTab('notifications')}
+                            title="Modo mantenimiento activo — todas las alertas silenciadas"
+                            style={{
+                                background: 'rgba(251,211,141,0.12)',
+                                border: '1px solid rgba(251,211,141,0.4)',
+                                borderRadius: 8, color: '#fbd38d', cursor: 'pointer',
+                                padding: '5px 10px', fontSize: 12,
+                                display: 'flex', alignItems: 'center', gap: 6,
+                                animation: 'pulse 2s infinite',
+                            }}
+                        >
+                            <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#fbd38d', display: 'inline-block' }} />
+                            Mantenimiento
+                        </button>
+                    )}
                     {/* Global search button */}
                     <button
                         onClick={() => setSearchOpen(true)}
@@ -340,19 +410,25 @@ export default function App() {
             {/* Main content */}
             <ErrorBoundary>
                 <main className="main-content">
-                    {tab === 'dashboard'     && <Dashboard onToast={onToast} />}
-                    {tab === 'proxmox'       && <ProxmoxPage onToast={onToast} />}
-                    {tab === 'opnsense'      && <OPNsensePage onToast={onToast} />}
-                    {tab === 'unraid'        && <UnraidPage onToast={onToast} />}
-                    {tab === 'network'       && <Network onToast={onToast} />}
-                    {tab === 'services'      && <Services onToast={onToast} />}
-                    {tab === 'notifications' && <Notifications onToast={onToast} />}
-                    {tab === 'settings'      && (
+                    {tab === 'dashboard'      && <Dashboard onToast={onToast} />}
+                    {tab === 'proxmox'        && <ProxmoxPage onToast={onToast} />}
+                    {tab === 'opnsense'       && <OPNsensePage onToast={onToast} />}
+                    {tab === 'unraid'         && <UnraidPage onToast={onToast} />}
+                    {tab === 'switch'         && <SwitchPage />}
+                    {tab === 'plex'           && <PlexPage onToast={onToast} />}
+                    {tab === 'immich'         && <ImmichPage onToast={onToast} />}
+                    {tab === 'homeassistant'  && <HomeAssistantPage onToast={onToast} />}
+                    {tab === 'portainer'      && <PortainerPage onToast={onToast} />}
+                    {tab === 'uptime_kuma'    && <UptimeKumaPage onToast={onToast} />}
+                    {tab === 'network'        && <Network onToast={onToast} />}
+                    {tab === 'notifications'  && <Notifications onToast={onToast} />}
+                    {tab === 'settings'       && (
                         <Settings
                             onToast={onToast}
                             currentUser={currentUser}
                             onUserUpdate={refreshUser}
                             onShowWizard={() => setNeedsSetup(true)}
+                            onSettingsSaved={loadConfiguredServices}
                         />
                     )}
                 </main>

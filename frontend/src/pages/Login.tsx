@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { authApi } from '../api'
+import { useState, useEffect } from 'react'
+import { authApi, api } from '../api'
 
 interface Props {
     onLoginSuccess: (token: string) => void
@@ -9,6 +9,11 @@ type Step = 'login' | 'totp-verify'
 
 export default function Login({ onLoginSuccess }: Props) {
     const [step, setStep] = useState<Step>('login')
+    const [appName, setAppName] = useState('LabDash')
+
+    useEffect(() => {
+        api.getAppConfig().then(r => setAppName(r.app_name || 'LabDash')).catch(() => {})
+    }, [])
     const [username, setUsername] = useState('')
     const [password, setPassword] = useState('')
     const [totpCode, setTotpCode] = useState('')
@@ -56,16 +61,10 @@ export default function Login({ onLoginSuccess }: Props) {
             }}>
                 {/* Logo */}
                 <div style={{ textAlign: 'center', marginBottom: 32 }}>
-                    <div style={{
-                        width: 60, height: 60, borderRadius: '50%',
-                        background: 'linear-gradient(135deg, var(--accent), var(--accent5))',
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        margin: '0 auto 14px',
-                        boxShadow: '0 0 30px rgba(99,179,237,0.3)',
-                    }}>
-                        <i className="fa-solid fa-network-wired" style={{ fontSize: 24, color: '#fff' }} />
+                    <div style={{ margin: '0 auto 14px', width: 72, height: 72 }}>
+                        <img src="/logo.svg" alt="LabDash" style={{ width: 72, height: 72, borderRadius: 16, boxShadow: '0 0 30px rgba(99,179,237,0.3)' }} />
                     </div>
-                    <h1 style={{ fontSize: 22, fontWeight: 700, margin: '0 0 4px' }}>MXHOME</h1>
+                    <h1 style={{ fontSize: 22, fontWeight: 700, margin: '0 0 4px' }}>{appName}</h1>
                     <p style={{ color: 'var(--muted)', fontSize: 13, margin: 0 }}>
                         {step === 'login' ? 'Accede a tu infraestructura' : 'Verificación en dos pasos'}
                     </p>

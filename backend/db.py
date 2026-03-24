@@ -89,7 +89,25 @@ CREATE TABLE IF NOT EXISTS alert_silences (
     rule_id     INTEGER NOT NULL,
     until_ts    INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    id         INTEGER PRIMARY KEY,
+    applied_at INTEGER NOT NULL
+);
 """
+
+# ── Schema migrations ─────────────────────────────────────────────────────────
+# Each entry: (id, sql). Migrations are applied in order and skipped if already applied.
+_MIGRATIONS: list[tuple[int, str]] = [
+    (1, "ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'admin'"),
+    (2,
+     "CREATE TABLE IF NOT EXISTS push_subscriptions ("
+     "id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, "
+     "endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL, "
+     "created_at INTEGER NOT NULL)"),
+    (3,
+     "CREATE TABLE IF NOT EXISTS alert_silences ("
+     "id INTEGER PRIMARY KEY AUTOINCREMENT, rule_id INTEGER NOT NULL, until_ts INTEGER NOT NULL)"),
+]
 
 # ── Init ──────────────────────────────────────────────────────────────────────
 
@@ -103,28 +121,21 @@ async def init_db():
             "PRAGMA temp_store=MEMORY;"
             "PRAGMA mmap_size=134217728;"  # 128 MB
         )
-        # Migrations: add columns if they don't exist yet
-        try:
-            await db.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'admin'")
-        except Exception:
-            pass  # column already exists
-        # Create push_subscriptions table if not exists (already in _CREATE for fresh installs)
-        try:
+        # Apply pending migrations sequentially
+        async with db.execute("SELECT id FROM schema_migrations") as cur:
+            applied = {row[0] for row in await cur.fetchall()}
+        now_ts = int(time.time())
+        for migration_id, sql in _MIGRATIONS:
+            if migration_id in applied:
+                continue
+            try:
+                await db.execute(sql)
+            except Exception:
+                pass  # e.g. column already exists on existing DB
             await db.execute(
-                "CREATE TABLE IF NOT EXISTS push_subscriptions ("
-                "id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, "
-                "endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL, "
-                "created_at INTEGER NOT NULL)"
+                "INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?,?)",
+                (migration_id, now_ts)
             )
-        except Exception:
-            pass
-        try:
-            await db.execute(
-                "CREATE TABLE IF NOT EXISTS alert_silences ("
-                "id INTEGER PRIMARY KEY AUTOINCREMENT, rule_id INTEGER NOT NULL, until_ts INTEGER NOT NULL)"
-            )
-        except Exception:
-            pass
         await db.commit()
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -383,6 +394,11 @@ async def get_events(limit: int = 50) -> list[dict]:
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
+async def clear_events() -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM events")
+        await db.commit()
+
 # ── Uptime log ────────────────────────────────────────────────────────────────
 
 async def insert_uptime(ts: int, host: str, up: bool):
@@ -582,6 +598,26 @@ async def update_alert_rule(rule_id: int, name: str, metric_key: str, operator: 
             (name, metric_key, operator, threshold, notify_url, cooldown_s, rule_id)
         )
         await db.commit()
+
+# ── Global silence (maintenance mode) ────────────────────────────────────────
+
+async def get_global_silence() -> bool:
+    val = await get_setting("global_silence", "false")
+    return val.lower() in ("true", "1", "yes")
+
+
+async def set_global_silence(enabled: bool):
+    await set_setting("global_silence", "true" if enabled else "false")
+
+
+# ── Metric keys ───────────────────────────────────────────────────────────────
+
+async def get_metric_keys() -> list[str]:
+    async with aiosqlite.connect(DB_PATH) as _db:
+        async with _db.execute("SELECT DISTINCT key FROM metrics ORDER BY key") as cur:
+            rows = await cur.fetchall()
+            return [r[0] for r in rows]
+
 
 # ── PostgreSQL override ───────────────────────────────────────────────────────
 # If DATABASE_URL is configured, replace every public function with the

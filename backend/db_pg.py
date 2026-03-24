@@ -117,6 +117,26 @@ _TABLES = [
         created_at BIGINT NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+        id         INTEGER PRIMARY KEY,
+        applied_at BIGINT NOT NULL
+    )
+    """,
+]
+
+# ── Schema migrations ─────────────────────────────────────────────────────────
+# Each entry: (id, sql). Already-applied migrations are skipped.
+_MIGRATIONS: list[tuple[int, str]] = [
+    (1, "ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'admin'"),
+    (2,
+     "CREATE TABLE IF NOT EXISTS push_subscriptions ("
+     "id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL, "
+     "endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL, "
+     "created_at BIGINT NOT NULL)"),
+    (3,
+     "CREATE TABLE IF NOT EXISTS alert_silences ("
+     "id SERIAL PRIMARY KEY, rule_id INTEGER NOT NULL, until_ts BIGINT NOT NULL)"),
 ]
 
 # ── Connection pool ───────────────────────────────────────────────────────────
@@ -143,10 +163,21 @@ async def init_db():
         async with conn.transaction():
             for stmt in _TABLES:
                 await conn.execute(stmt)
-            # Migration: add role column if missing
-            await conn.execute(
-                "ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'admin'"
-            )
+            # Apply pending migrations sequentially
+            applied_rows = await conn.fetch("SELECT id FROM schema_migrations")
+            applied = {r["id"] for r in applied_rows}
+            now_ts = int(time.time())
+            for migration_id, sql in _MIGRATIONS:
+                if migration_id in applied:
+                    continue
+                try:
+                    await conn.execute(sql)
+                except Exception:
+                    pass  # already exists
+                await conn.execute(
+                    "INSERT INTO schema_migrations (id, applied_at) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                    migration_id, now_ts
+                )
 
 # ── Settings cache ────────────────────────────────────────────────────────────
 
@@ -390,6 +421,10 @@ async def get_events(limit: int = 50) -> list[dict]:
     )
     return _rows(rows)
 
+async def clear_events() -> None:
+    async with _pool.acquire() as conn:
+        await conn.execute("DELETE FROM events")
+
 # ── Uptime ────────────────────────────────────────────────────────────────────
 
 async def insert_uptime(ts: int, host: str, up: bool):
@@ -541,3 +576,63 @@ async def list_active_sessions(user_id: int) -> list[dict]:
         user_id, now
     )
     return [{"token_hint": r["token"][:8] + "…", "expires_at": r["expires_at"], "token": r["token"]} for r in rows]
+
+
+# ── Global silence (maintenance mode) ────────────────────────────────────────
+
+async def get_global_silence() -> bool:
+    val = await get_setting("global_silence", "false")
+    return val.lower() in ("true", "1", "yes")
+
+
+async def set_global_silence(enabled: bool):
+    await set_setting("global_silence", "true" if enabled else "false")
+
+
+# ── Metric keys ───────────────────────────────────────────────────────────────
+
+async def get_metric_keys() -> list[str]:
+    pool = await _get_pool()
+    rows = await pool.fetch("SELECT DISTINCT key FROM metrics ORDER BY key")
+    return [r["key"] for r in rows]
+
+
+# ── Alert silences (pg version) ───────────────────────────────────────────────
+
+async def silence_rule(rule_id: int, until_ts: int):
+    pool = await _get_pool()
+    await pool.execute(
+        "INSERT INTO alert_silences (rule_id, until_ts) VALUES ($1,$2) "
+        "ON CONFLICT (rule_id) DO UPDATE SET until_ts=EXCLUDED.until_ts",
+        rule_id, until_ts
+    )
+
+
+async def is_silenced(rule_id: int) -> bool:
+    now = int(time.time())
+    pool = await _get_pool()
+    row = await pool.fetchrow(
+        "SELECT until_ts FROM alert_silences WHERE rule_id=$1 AND until_ts>$2",
+        rule_id, now
+    )
+    return row is not None
+
+
+async def get_silences() -> list[dict]:
+    now = int(time.time())
+    pool = await _get_pool()
+    rows = await pool.fetch(
+        "SELECT rule_id, until_ts FROM alert_silences WHERE until_ts>$1 ORDER BY rule_id",
+        now
+    )
+    return _rows(rows)
+
+
+async def update_alert_rule(rule_id: int, name: str, metric_key: str, operator: str,
+                            threshold: float, notify_url: str, cooldown_s: int):
+    pool = await _get_pool()
+    await pool.execute(
+        "UPDATE alert_rules SET name=$1, metric_key=$2, operator=$3, threshold=$4, "
+        "notify_url=$5, cooldown_s=$6 WHERE id=$7",
+        name, metric_key, operator, threshold, notify_url, cooldown_s, rule_id
+    )

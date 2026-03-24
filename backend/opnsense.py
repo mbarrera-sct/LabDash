@@ -11,6 +11,9 @@ import asyncio, time, os
 import httpx
 from db import get_setting
 
+# SSL_VERIFY=true to enable certificate verification (disabled by default — homelab self-signed certs)
+_SSL_VERIFY = os.environ.get("SSL_VERIFY", "false").lower() in ("true", "1", "yes")
+
 _cache: dict = {"data": None, "ts": 0}
 _lock: asyncio.Lock | None = None   # created lazily inside the running event loop
 TTL = 90  # 90s cache — reduces how often the slow OPNsense fetch is triggered
@@ -67,7 +70,7 @@ async def fetch() -> tuple[dict, str | None]:
             # Hard 20s ceiling — ensures the lock is ALWAYS released even if SSL or DNS hangs
             async with asyncio.timeout(20):
                 async with httpx.AsyncClient(
-                    base_url=url, verify=False, timeout=_TIMEOUT, auth=auth
+                    base_url=url, verify=_SSL_VERIFY, timeout=_TIMEOUT, auth=auth
                 ) as c:
                     # ── Run all independent requests concurrently ──────────────
                     (
@@ -82,6 +85,9 @@ async def fetch() -> tuple[dict, str | None]:
                         wg_servers_raw,
                         dhcp_kea,
                         dhcp_isc,
+                        sys_information,
+                        sys_resources,
+                        sys_activity,
                     ) = await asyncio.gather(
                         _safe_get(c, "/api/diagnostics/interface/getInterfaceStatistics"),
                         _safe_get(c, "/api/routes/gateway/status"),
@@ -98,6 +104,9 @@ async def fetch() -> tuple[dict, str | None]:
                                    json={"current_page": 1, "page_size_value": 500}),
                         _safe_get(c, "/api/dhcpv4/leases/searchLease",
                                   params={"current_page": 1, "page_size_value": 500}),
+                        _safe_get(c, "/api/diagnostics/system/systemInformation"),
+                        _safe_get(c, "/api/diagnostics/system/systemResources"),
+                        _safe_get(c, "/api/diagnostics/activity/getActivity"),
                     )
 
             # ── Merge results ──────────────────────────────────────────────────
@@ -115,14 +124,17 @@ async def fetch() -> tuple[dict, str | None]:
             }
 
             data = {
-                "interfaces": ifaces,
-                "gateways":   gateways,
-                "sysinfo":    sysinfo,
-                "dhcp":       dhcp,
-                "arp":        arp,
-                "fw_log":     fw_log,
-                "fw_rules":   fw_rules,
-                "wireguard":  wireguard,
+                "interfaces":      ifaces,
+                "gateways":        gateways,
+                "sysinfo":         sysinfo,
+                "dhcp":            dhcp,
+                "arp":             arp,
+                "fw_log":          fw_log,
+                "fw_rules":        fw_rules,
+                "wireguard":       wireguard,
+                "sys_information": sys_information,
+                "sys_resources":   sys_resources,
+                "sys_activity":    sys_activity,
             }
             _cache = {"data": data, "ts": time.time()}
             return data, None
